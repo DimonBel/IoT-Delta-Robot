@@ -1,17 +1,15 @@
 import threading
 import time
-
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
 import uvicorn
 
-from vision import ImageRecognition
-from robot import RobotController
-
+from vision.vision import ImageRecognition
+from robot.robot import RobotController
 
 app = FastAPI()
-templates = Jinja2Templates(directory="templates")
+templates = Jinja2Templates(directory="main/templates")
 
 vision = ImageRecognition()
 robot = RobotController()
@@ -20,10 +18,16 @@ auto_running = False
 auto_thread = None
 
 
+"""
+main working loop
+capture frame -> analyze -> move -> pick
+
+the loop logic is a placeholder, will figure out the rest later
+"""
 def automatic_loop():
     global auto_running
 
-    print("Automatic loop started")
+    print("loop started")
 
     while auto_running:
         try:
@@ -39,18 +43,22 @@ def automatic_loop():
                 robot.pick()
 
         except Exception as e:
-            print("Loop error:", e)
+            print("loop error:", e)
 
         time.sleep(0.1)
 
-    print("Automatic loop stopped")
+    print("loop stopped")
 
 
+"""
+web ui routes
+will add more later
+"""
 @app.get("/")
-def index(request: Request):
+async def index(request: Request):
     return templates.TemplateResponse(
-        "index.html",
-        {"request": request}
+        request=request,
+        name="index.html",
     )
 
 
@@ -85,5 +93,9 @@ def status():
     })
 
 
+"""
+start the server
+run from project root with: uvicorn main.main:app --reload
+"""
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
