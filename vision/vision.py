@@ -1,18 +1,74 @@
-# Alexandra, this is entirely up to you
-# Change the implementation howevever you like
-
-class ImageRecognition:
-    def __init__(self):
-        pass
-
-
 # The logic is lazy-loaded to avoid breaking environments where ZED/OpenCV are not installed yet.
 import json
+import importlib
 import math
 import time
 import urllib.error
 import urllib.request
 
+class ImageRecognition:
+    def __init__(
+        self,
+        confidence: int = 40,
+        model: str = "medium",
+        backend_url: str = "",
+        backend_timeout: float = 1.5,
+        backend_every_n_frames: int = 1,
+        auto_start: bool = True,
+    ):
+        self._config = {
+            "confidence": confidence,
+            "model": model,
+            "backend_url": backend_url,
+            "backend_timeout": backend_timeout,
+            "backend_every_n_frames": backend_every_n_frames,
+        }
+        self._zed_pipeline = ZEDCoordinateVisionPipeline(**self._config)
+        self._zed_enabled = False
+
+        if auto_start:
+            self.start()
+
+    def start(self) -> bool:
+        if self._zed_enabled:
+            return True
+        self._zed_enabled = self._zed_pipeline.open()
+        return self._zed_enabled
+
+    def stop(self):
+        if self._zed_pipeline:
+            self._zed_pipeline.close()
+        self._zed_enabled = False
+
+    def get_frame(self):
+        # Lazy start so app can boot even when camera/SDK is temporarily unavailable.
+        if not self._zed_enabled and not self.start():
+            return None
+        return self._zed_pipeline.read()
+
+    def analyze(self, frame):
+        if not frame:
+            return None
+
+        payload = frame.get("payload", {})
+        detections = payload.get("detections", [])
+        if not detections:
+            return None
+
+        best = max(detections, key=lambda d: d.get("confidence") or 0.0)
+        pos = best.get("position_m", {})
+        return {
+            "x": pos.get("x"),
+            "y": pos.get("y"),
+            "z": pos.get("z"),
+            "label": best.get("label"),
+            "confidence": best.get("confidence"),
+            "distance_m": best.get("distance_m"),
+        }
+
+    def get_detection_data(self):
+        frame = self.get_frame()
+        return self.analyze(frame)
 
 def safe_point_at_pixel(point_cloud, x: int, y: int):
     error_code, point = point_cloud.get_value(x, y)
@@ -90,9 +146,9 @@ class ZEDCoordinateVisionPipeline:
 
     def _try_import_dependencies(self):
         try:
-            import pyzed.sl as sl
-            import cv2
-            import numpy as np
+            sl = importlib.import_module("pyzed.sl")
+            cv2 = importlib.import_module("cv2")
+            np = importlib.import_module("numpy")
         except Exception:
             return None, None, None
         return sl, cv2, np
@@ -259,39 +315,3 @@ class ZEDCoordinateVisionPipeline:
             pass
 
 
-def _image_recognition_init(self):
-    self._zed_pipeline = ZEDCoordinateVisionPipeline()
-    self._zed_enabled = self._zed_pipeline.open()
-
-
-def _image_recognition_get_frame(self):
-    if not getattr(self, "_zed_enabled", False):
-        return None
-    return self._zed_pipeline.read()
-
-
-def _image_recognition_analyze(self, frame):
-    if not frame:
-        return None
-
-    payload = frame.get("payload", {})
-    detections = payload.get("detections", [])
-    if not detections:
-        return None
-
-    best = max(detections, key=lambda d: d.get("confidence") or 0.0)
-    pos = best.get("position_m", {})
-    return {
-        "x": pos.get("x"),
-        "y": pos.get("y"),
-        "z": pos.get("z"),
-        "label": best.get("label"),
-        "confidence": best.get("confidence"),
-        "distance_m": best.get("distance_m"),
-    }
-
-
-# Keep original class declaration untouched while adding practical behavior.
-ImageRecognition.__init__ = _image_recognition_init
-ImageRecognition.get_frame = _image_recognition_get_frame
-ImageRecognition.analyze = _image_recognition_analyze
