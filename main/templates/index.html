@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+
+<body>
+  <h2>Delta Robot Control</h2>
+
+  <button onclick="start()">Start Automatic Mode</button>
+  <button onclick="stop()">Stop</button>
+
+  <p id="status">idle</p>
+
+  <script>
+    async function start() {
+      await fetch("/start", { method: "POST" });
+    }
+
+    async function stop() {
+      await fetch("/stop", { method: "POST" });
+    }
+
+    async function updateStatus() {
+      const r = await fetch("/status");
+      const data = await r.json();
+      document.getElementById("status").innerText = data.status;
+    }
+
+    setInterval(updateStatus, 500);
+  </script>
+</body>
+
+</html>
