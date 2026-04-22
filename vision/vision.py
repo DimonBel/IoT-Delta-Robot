@@ -2,28 +2,78 @@
 import json
 import importlib
 import math
+import os
+import sys
+import traceback
 import time
 import urllib.error
 import urllib.request
+
+
+FRUIT_VEGETABLE_CLASSES = {
+    "apple", "banana", "orange", "carrot", "broccoli",
+    "tomato", "lemon", "pear", "peach", "strawberry",
+    "potato", "cucumber", "onion", "pepper", "eggplant",
+    "grape", "mango", "watermelon", "melon", "cherry",
+    "fresh", "spoiled", "rotten", "bad", "good" # For future custom sorting models
+}
+
+ELECTRONICS_CLASSES = {
+    "cell phone",
+    "laptop",
+    "mouse",
+    "remote",
+    "keyboard",
+    "tv",
+    "monitor",
+}
+
+
+def classify_yolo_label(label: str):
+    normalized = (label or "").strip().lower()
+    
+    # Check if exact match or contains partial grading keywords
+    if normalized in FRUIT_VEGETABLE_CLASSES or any(kw in normalized for kw in ["apple", "potato", "carrot", "tomato", "fresh", "rotten", "spoiled", "good", "bad", "fruit", "veg"]):
+        return "produce", normalized
+        
+    if normalized == "person":
+        return "presence", "person_presence"
+        
+    if normalized in ELECTRONICS_CLASSES:
+        return "presence", "electronics_presence"
+        
+    return "skip", None
 
 class ImageRecognition:
     def __init__(
         self,
         confidence: int = 40,
-        model: str = "medium",
+        model: str = "medium",  # Maps to yolov8m.pt by default for better fruit detection, or pass a custom .pt file path
+        algorithm: str = "yolo", # Defaulting to yolo for more advanced tracking
         backend_url: str = "",
         backend_timeout: float = 1.5,
         backend_every_n_frames: int = 1,
         auto_start: bool = True,
+        debug: bool = False,
     ):
         self._config = {
             "confidence": confidence,
             "model": model,
+            "algorithm": algorithm,
             "backend_url": backend_url,
             "backend_timeout": backend_timeout,
             "backend_every_n_frames": backend_every_n_frames,
         }
-        self._zed_pipeline = ZEDCoordinateVisionPipeline(**self._config)
+        self._debug = debug
+        pipeline_map = {
+            "zed": ZEDCoordinateVisionPipeline,
+            "yolo": ZEDYoloVisionPipeline,
+        }
+        pipeline_cls = pipeline_map.get((algorithm or "zed").lower())
+        if pipeline_cls is None:
+            raise ValueError("Unsupported algorithm. Use 'zed' or 'yolo'.")
+
+        self._zed_pipeline = pipeline_cls(**self._config)
         self._zed_enabled = False
 
         if auto_start:
@@ -32,7 +82,7 @@ class ImageRecognition:
     def start(self) -> bool:
         if self._zed_enabled:
             return True
-        self._zed_enabled = self._zed_pipeline.open()
+        self._zed_enabled = self._zed_pipeline.open(verbose=self._debug)
         return self._zed_enabled
 
     def stop(self):
@@ -70,9 +120,9 @@ class ImageRecognition:
         frame = self.get_frame()
         return self.analyze(frame)
 
-def safe_point_at_pixel(point_cloud, x: int, y: int):
+def safe_point_at_pixel(point_cloud, sl, x: int, y: int):
     error_code, point = point_cloud.get_value(x, y)
-    if error_code != point_cloud._sl.ERROR_CODE.SUCCESS:
+    if error_code != sl.ERROR_CODE.SUCCESS:
         return None
 
     px, py, pz = point[0], point[1], point[2]
@@ -123,6 +173,7 @@ class ZEDCoordinateVisionPipeline:
         self,
         confidence: int = 40,
         model: str = "medium",
+        algorithm: str = "zed",
         backend_url: str = "",
         backend_timeout: float = 1.5,
         backend_every_n_frames: int = 1,
@@ -144,13 +195,101 @@ class ZEDCoordinateVisionPipeline:
         self._frame_index = 0
         self._last_backend_error_ts = 0.0
 
-    def _try_import_dependencies(self):
+    def _configure_windows_zed_runtime(self, verbose: bool = False):
+        if sys.platform != "win32":
+            return
+
+        candidate_roots = [
+            os.environ.get("ZED_SDK_ROOT_DIR", ""),
+            r"C:\Program Files\ZED SDK",
+            r"C:\Program Files (x86)\ZED SDK",
+        ]
+        candidate_roots = [p for p in candidate_roots if p and os.path.isdir(p)]
+
+        search_dirs = []
+        for root in candidate_roots:
+            search_dirs.extend(
+                [
+                    root,
+                    os.path.join(root, "bin"),
+                    os.path.join(root, "lib"),
+                    os.path.join(root, "python"),
+                    os.path.join(root, "python_api"),
+                ]
+            )
+
+        for d in search_dirs:
+            if not os.path.isdir(d):
+                continue
+            if d not in sys.path:
+                sys.path.insert(0, d)
+            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+            if hasattr(os, "add_dll_directory"):
+                try:
+                    os.add_dll_directory(d)
+                except OSError:
+                    pass
+
+            pyzed_pkg = os.path.join(d, "pyzed")
+            if os.path.isdir(pyzed_pkg) and d not in sys.path:
+                sys.path.insert(0, d)
+
+        if verbose:
+            print("[DEBUG] Probed Windows ZED SDK paths for pyzed and DLLs")
+
+    def _try_import_dependencies(self, verbose: bool = False):
+        pyzed_error = None
         try:
             sl = importlib.import_module("pyzed.sl")
+        except ImportError as e:
+            pyzed_error = e
+            self._configure_windows_zed_runtime(verbose=verbose)
+            try:
+                sl = importlib.import_module("pyzed.sl")
+            except ImportError:
+                if verbose:
+                    print(f"[DEBUG] Import error: {pyzed_error}")
+                    try:
+                        pyzed_mod = importlib.import_module("pyzed")
+                        pyzed_origin = getattr(pyzed_mod, "__file__", "<unknown>")
+                        print(f"[DEBUG] Found 'pyzed' module at: {pyzed_origin}")
+                    except Exception:
+                        pass
+
+                    major, minor = sys.version_info.major, sys.version_info.minor
+                    if major == 3 and minor >= 13:
+                        print("[DEBUG] Python 3.13+ detected. ZED Python bindings are often unavailable for this version.")
+                        print("[DEBUG] Recommended: use Python 3.10 or 3.11 (64-bit) in a virtual environment.")
+
+                    print("[DEBUG] If you installed 'pip install pyzed', uninstall it. It is not the official Stereolabs binding.")
+                    print("[DEBUG] Run: python -m pip uninstall -y pyzed")
+                    print("[DEBUG] Then run: C:\\Program Files (x86)\\ZED SDK\\get_python_api.py")
+                return None, None, None
+            except Exception as inner_e:
+                if verbose:
+                    print(f"[DEBUG] Unexpected import error: {inner_e}")
+                    print(traceback.format_exc())
+                return None, None, None
+        except Exception as e:
+            if verbose:
+                print(f"[DEBUG] Unexpected import error: {e}")
+                print(traceback.format_exc())
+            return None, None, None
+
+        cv2 = None
+        np = None
+        try:
             cv2 = importlib.import_module("cv2")
+        except Exception:
+            if verbose:
+                print("[DEBUG] OpenCV import failed; RGB/depth visualization will be disabled")
+
+        try:
             np = importlib.import_module("numpy")
         except Exception:
-            return None, None, None
+            if verbose:
+                print("[DEBUG] NumPy import failed; depth colormap visualization will be disabled")
+
         return sl, cv2, np
 
     def _try_open_camera_with_fallbacks(self):
@@ -181,21 +320,39 @@ class ZEDCoordinateVisionPipeline:
 
         return False
 
-    def open(self):
-        sl, _cv2, _np = self._try_import_dependencies()
+    def open(self, verbose: bool = False):
+        if verbose:
+            print("[DEBUG] Opening ZED camera...")
+
+        sl, _cv2, _np = self._try_import_dependencies(verbose=verbose)
         if not sl:
+            if verbose:
+                print("[DEBUG] Failed to import dependencies")
             return False
 
         self._sl = sl
         self._zed = sl.Camera()
+        if verbose:
+            print("[DEBUG] Camera object created, attempting to open...")
+
         if not self._try_open_camera_with_fallbacks():
+            if verbose:
+                print("[DEBUG] Failed to open camera with fallback attempts")
             return False
+
+        if verbose:
+            print("[DEBUG] Camera opened, enabling positional tracking...")
 
         tracking_params = sl.PositionalTrackingParameters()
         status = self._zed.enable_positional_tracking(tracking_params)
         if status != sl.ERROR_CODE.SUCCESS:
+            if verbose:
+                print(f"[DEBUG] Failed to enable positional tracking: {status}")
             self.close()
             return False
+
+        if verbose:
+            print("[DEBUG] Positional tracking enabled, enabling object detection...")
 
         detection_model_map = {
             "fast": sl.OBJECT_DETECTION_MODEL.MULTI_CLASS_BOX_FAST,
@@ -212,6 +369,8 @@ class ZEDCoordinateVisionPipeline:
 
         status = self._zed.enable_object_detection(detection_params)
         if status != sl.ERROR_CODE.SUCCESS:
+            if verbose:
+                print(f"[DEBUG] Failed to enable object detection: {status}")
             self.close()
             return False
 
@@ -221,20 +380,23 @@ class ZEDCoordinateVisionPipeline:
 
         self._objects = sl.Objects()
         self._point_cloud = sl.Mat()
-        self._point_cloud._sl = sl
         self._left_image = sl.Mat()
         self._depth_map = sl.Mat()
+
+        if verbose:
+            print("[DEBUG] ZED camera fully initialized")
+
         return True
 
     def _zed_rgba_to_bgr(self, image_mat):
-        _sl, cv2, _np = self._try_import_dependencies()
+        _sl, cv2, _np = self._try_import_dependencies(verbose=False)
         if cv2 is None:
             return None
         rgba = image_mat.get_data()
-        return cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR)
+        return cv2.cvtColor(rgba, cv2.COLOR_BGRA2BGR)
 
     def _depth_to_colormap(self, depth_mat, max_depth_m=8.0):
-        _sl, cv2, np = self._try_import_dependencies()
+        _sl, cv2, np = self._try_import_dependencies(verbose=False)
         if cv2 is None or np is None:
             return None
         depth = depth_mat.get_data()
@@ -273,7 +435,532 @@ class ZEDCoordinateVisionPipeline:
 
             if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(z)):
                 cx, cy = center_from_bbox_2d(obj.bounding_box_2d)
-                fallback = safe_point_at_pixel(self._point_cloud, cx, cy)
+                fallback = safe_point_at_pixel(self._point_cloud, sl, cx, cy)
+                if fallback is not None:
+                    x, y, z = fallback
+                else:
+                    continue
+
+            distance = math.sqrt(x * x + y * y + z * z)
+            detection_record = build_detection_record(obj, x, y, z, distance)
+            frame_payload["detections"].append(detection_record)
+
+        if self.backend_url and (self._frame_index % self.backend_every_n_frames == 0):
+            try:
+                send_json_payload(self.backend_url, frame_payload, self.backend_timeout)
+            except (urllib.error.URLError, TimeoutError, ValueError):
+                now = time.time()
+                if now - self._last_backend_error_ts > 2.0:
+                    self._last_backend_error_ts = now
+
+        return {
+            "rgb": rgb_frame,
+            "depth": depth_frame,
+            "payload": frame_payload,
+        }
+
+    def close(self):
+        if not self._zed:
+            return
+
+        try:
+            self._zed.disable_object_detection()
+        except Exception:
+            pass
+        try:
+            self._zed.disable_positional_tracking()
+        except Exception:
+            pass
+        try:
+            self._zed.close()
+        except Exception:
+            pass
+
+
+class ZEDYoloVisionPipeline(ZEDCoordinateVisionPipeline):
+    def __init__(
+        self,
+        confidence: int = 40,
+        model: str = "medium",
+        algorithm: str = "yolo",
+        backend_url: str = "",
+        backend_timeout: float = 1.5,
+        backend_every_n_frames: int = 1,
+    ):
+        super().__init__(
+            confidence=confidence,
+            model=model,
+            algorithm=algorithm,
+            backend_url=backend_url,
+            backend_timeout=backend_timeout,
+            backend_every_n_frames=backend_every_n_frames,
+        )
+        self._yolo = None
+        self._class_names = {}
+        self._cv2 = None
+        self._np = None
+
+    def _resolve_yolo_model_name(self):
+        # By default, use heavier models for better fruit recognition if predefined alias is used,
+        # but allow passing a custom '.pt' file path directly (e.g., 'best.pt' for a trained model).
+        presets = {
+            "fast": "yolov8s.pt",
+            "medium": "yolov8m.pt",
+            "accurate": "yolov8l.pt",
+            "extreme": "yolov8x.pt"
+        }
+        return presets.get(self.model, self.model)
+
+    def _try_import_yolo_dependencies(self, verbose: bool = False):
+        sl, cv2, np = self._try_import_dependencies(verbose=verbose)
+        if not sl or np is None:
+            return None, None, None, None
+
+        try:
+            yolo_cls = importlib.import_module("ultralytics").YOLO
+        except Exception as e:
+            if verbose:
+                print(f"[DEBUG] Failed to import ultralytics YOLO: {e}")
+                print("[DEBUG] Install with: python -m pip install ultralytics")
+            return None, None, None, None
+
+        return sl, cv2, np, yolo_cls
+
+    def _rgba_to_bgr(self, rgba_frame):
+        # Prefer OpenCV conversion when available, otherwise use NumPy channel flip.
+        if self._cv2 is not None:
+            return self._cv2.cvtColor(rgba_frame, self._cv2.COLOR_BGRA2BGR)
+        return rgba_frame[:, :, :3][:, :, ::-1]
+
+    def _draw_yolo_overlay(self, frame, detections):
+        if frame is None or self._cv2 is None:
+            return frame
+
+        overlay = frame.copy()
+        for detection in detections:
+            if detection.get("detection_type") != "produce":
+                continue
+
+            bbox = detection.get("bbox_xyxy")
+            if not bbox:
+                continue
+
+            x1, y1, x2, y2 = [int(v) for v in bbox]
+            label = detection.get("label", "produce")
+            confidence = detection.get("confidence", 0.0)
+            distance = detection.get("distance_m")
+
+            if distance is None:
+                caption = f"{label} {confidence:.1f}%"
+            else:
+                caption = f"{label} {confidence:.1f}% {distance:.2f}m"
+
+            self._cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 220, 0), 2)
+            text_y = max(20, y1 - 8)
+            self._cv2.putText(
+                overlay,
+                caption,
+                (x1, text_y),
+                self._cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 220, 0),
+                2,
+            )
+
+        return overlay
+
+    def open(self, verbose: bool = False):
+        if verbose:
+            print("[DEBUG] Opening ZED camera for YOLO pipeline...")
+
+        sl, cv2, np, yolo_cls = self._try_import_yolo_dependencies(verbose=verbose)
+        if not sl or yolo_cls is None:
+            if verbose:
+                print("[DEBUG] Missing dependencies for YOLO pipeline")
+            return False
+
+        self._sl = sl
+        self._cv2 = cv2
+        self._np = np
+
+        try:
+            self._yolo = yolo_cls(self._resolve_yolo_model_name())
+        except Exception as e:
+            if verbose:
+                print(f"[DEBUG] Failed to initialize YOLO model: {e}")
+            return False
+
+        self._class_names = getattr(self._yolo, "names", {}) or {}
+        self._zed = sl.Camera()
+        if not self._try_open_camera_with_fallbacks():
+            if verbose:
+                print("[DEBUG] Failed to open camera with fallback attempts")
+            return False
+
+        self._runtime_params = sl.RuntimeParameters()
+        self._point_cloud = sl.Mat()
+        self._left_image = sl.Mat()
+        self._depth_map = sl.Mat()
+
+        if verbose:
+            print("[DEBUG] YOLO + ZED pipeline initialized")
+
+        return True
+
+    def read(self):
+        if not self._zed or not self._yolo:
+            return None
+
+        sl = self._sl
+        if self._zed.grab(self._runtime_params) != sl.ERROR_CODE.SUCCESS:
+            return None
+
+        self._frame_index += 1
+
+        self._zed.retrieve_measure(self._point_cloud, sl.MEASURE.XYZRGBA, sl.MEM.CPU)
+        self._zed.retrieve_image(self._left_image, sl.VIEW.LEFT, sl.MEM.CPU)
+        self._zed.retrieve_measure(self._depth_map, sl.MEASURE.DEPTH, sl.MEM.CPU)
+
+        rgba_frame = self._left_image.get_data()
+        if rgba_frame is None:
+            return None
+
+        rgb_frame = self._rgba_to_bgr(rgba_frame)
+        depth_frame = self._depth_to_colormap(self._depth_map)
+
+        try:
+            yolo_results = self._yolo.predict(
+                source=rgb_frame,
+                conf=max(0.01, min(0.99, self.confidence / 100.0)),
+                verbose=False,
+            )
+        except Exception:
+            yolo_results = []
+
+        frame_payload = {
+            "timestamp_unix": time.time(),
+            "frame_index": self._frame_index,
+            "detections": [],
+        }
+
+        overlay_detections = []
+
+        if yolo_results:
+            result = yolo_results[0]
+            boxes = getattr(result, "boxes", None)
+            if boxes is not None:
+                for idx, box in enumerate(boxes):
+                    cls_raw = float(box.cls[0]) if box.cls is not None else -1
+                    cls_id = int(cls_raw)
+                    source_label = str(self._class_names.get(cls_id, f"class_{cls_id}"))
+                    detection_type, final_label = classify_yolo_label(source_label)
+                    if detection_type == "skip":
+                        continue
+
+                    conf = float(box.conf[0]) * 100.0 if box.conf is not None else 0.0
+                    xyxy = box.xyxy[0].tolist() if box.xyxy is not None else [0, 0, 0, 0]
+                    x1, y1, x2, y2 = [int(v) for v in xyxy]
+                    cx = int((x1 + x2) / 2)
+                    cy = int((y1 + y2) / 2)
+
+                    fallback = safe_point_at_pixel(self._point_cloud, sl, cx, cy)
+                    if fallback is None:
+                        px = py = pz = None
+                        distance = None
+                    else:
+                        px, py, pz = fallback
+                        distance = math.sqrt(px * px + py * py + pz * pz)
+
+                    if detection_type == "presence":
+                        detection_record = {
+                            "id": idx,
+                            "label": final_label,
+                            "source_label": source_label,
+                            "detection_type": detection_type,
+                            "confidence": to_builtin_float(conf),
+                            "position_m": {"x": None, "y": None, "z": None},
+                            "distance_m": to_builtin_float(distance),
+                            "presence": True,
+                            "bbox_xyxy": [x1, y1, x2, y2],
+                        }
+                    else:
+                        detection_record = {
+                            "id": idx,
+                            "label": final_label,
+                            "source_label": source_label,
+                            "detection_type": detection_type,
+                            "confidence": to_builtin_float(conf),
+                            "position_m": {
+                                "x": to_builtin_float(px),
+                                "y": to_builtin_float(py),
+                                "z": to_builtin_float(pz),
+                            },
+                            "distance_m": to_builtin_float(distance),
+                            "bbox_xyxy": [x1, y1, x2, y2],
+                        }
+
+                    frame_payload["detections"].append(detection_record)
+                    if detection_type == "produce":
+                        overlay_detections.append(detection_record)
+
+        annotated_frame = self._draw_yolo_overlay(rgb_frame, overlay_detections)
+
+        if self.backend_url and (self._frame_index % self.backend_every_n_frames == 0):
+            try:
+                send_json_payload(self.backend_url, frame_payload, self.backend_timeout)
+            except (urllib.error.URLError, TimeoutError, ValueError):
+                now = time.time()
+                if now - self._last_backend_error_ts > 2.0:
+                    self._last_backend_error_ts = now
+
+        return {
+            "rgb": rgb_frame,
+            "annotated_rgb": annotated_frame,
+            "depth": depth_frame,
+            "payload": frame_payload,
+        }
+
+    def _configure_windows_zed_runtime(self, verbose: bool = False):
+        if sys.platform != "win32":
+            return
+
+        candidate_roots = [
+            os.environ.get("ZED_SDK_ROOT_DIR", ""),
+            r"C:\Program Files\ZED SDK",
+            r"C:\Program Files (x86)\ZED SDK",
+        ]
+        candidate_roots = [p for p in candidate_roots if p and os.path.isdir(p)]
+
+        search_dirs = []
+        for root in candidate_roots:
+            search_dirs.extend(
+                [
+                    root,
+                    os.path.join(root, "bin"),
+                    os.path.join(root, "lib"),
+                    os.path.join(root, "python"),
+                    os.path.join(root, "python_api"),
+                ]
+            )
+
+        for d in search_dirs:
+            if not os.path.isdir(d):
+                continue
+            if d not in sys.path:
+                sys.path.insert(0, d)
+            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+            if hasattr(os, "add_dll_directory"):
+                try:
+                    os.add_dll_directory(d)
+                except OSError:
+                    pass
+
+            pyzed_pkg = os.path.join(d, "pyzed")
+            if os.path.isdir(pyzed_pkg) and d not in sys.path:
+                sys.path.insert(0, d)
+
+        if verbose:
+            print("[DEBUG] Probed Windows ZED SDK paths for pyzed and DLLs")
+
+    def _try_import_dependencies(self, verbose: bool = False):
+        pyzed_error = None
+        try:
+            sl = importlib.import_module("pyzed.sl")
+        except ImportError as e:
+            pyzed_error = e
+            self._configure_windows_zed_runtime(verbose=verbose)
+            try:
+                sl = importlib.import_module("pyzed.sl")
+            except ImportError:
+                if verbose:
+                    print(f"[DEBUG] Import error: {pyzed_error}")
+                    try:
+                        pyzed_mod = importlib.import_module("pyzed")
+                        pyzed_origin = getattr(pyzed_mod, "__file__", "<unknown>")
+                        print(f"[DEBUG] Found 'pyzed' module at: {pyzed_origin}")
+                    except Exception:
+                        pass
+
+                    major, minor = sys.version_info.major, sys.version_info.minor
+                    if major == 3 and minor >= 13:
+                        print("[DEBUG] Python 3.13+ detected. ZED Python bindings are often unavailable for this version.")
+                        print("[DEBUG] Recommended: use Python 3.10 or 3.11 (64-bit) in a virtual environment.")
+
+                    print("[DEBUG] If you installed 'pip install pyzed', uninstall it. It is not the official Stereolabs binding.")
+                    print("[DEBUG] Run: python -m pip uninstall -y pyzed")
+                    print("[DEBUG] Then run: C:\\Program Files (x86)\\ZED SDK\\get_python_api.py")
+                return None, None, None
+            except Exception as inner_e:
+                if verbose:
+                    print(f"[DEBUG] Unexpected import error: {inner_e}")
+                    print(traceback.format_exc())
+                return None, None, None
+        except Exception as e:
+            if verbose:
+                print(f"[DEBUG] Unexpected import error: {e}")
+                print(traceback.format_exc())
+            return None, None, None
+
+        cv2 = None
+        np = None
+        try:
+            cv2 = importlib.import_module("cv2")
+        except Exception:
+            if verbose:
+                print("[DEBUG] OpenCV import failed; RGB/depth visualization will be disabled")
+
+        try:
+            np = importlib.import_module("numpy")
+        except Exception:
+            if verbose:
+                print("[DEBUG] NumPy import failed; depth colormap visualization will be disabled")
+
+        return sl, cv2, np
+
+    def _try_open_camera_with_fallbacks(self):
+        sl = self._sl
+        attempts = [
+            ("HD720@30 ULTRA", sl.RESOLUTION.HD720, 30, sl.DEPTH_MODE.ULTRA),
+            ("HD720@15 PERFORMANCE", sl.RESOLUTION.HD720, 15, sl.DEPTH_MODE.PERFORMANCE),
+            ("VGA@30 PERFORMANCE", sl.RESOLUTION.VGA, 30, sl.DEPTH_MODE.PERFORMANCE),
+            ("VGA@15 PERFORMANCE", sl.RESOLUTION.VGA, 15, sl.DEPTH_MODE.PERFORMANCE),
+        ]
+
+        for _label, resolution, fps, depth_mode in attempts:
+            init_params = sl.InitParameters()
+            init_params.depth_mode = depth_mode
+            init_params.coordinate_units = sl.UNIT.METER
+            init_params.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
+            init_params.camera_resolution = resolution
+            init_params.camera_fps = fps
+            init_params.camera_disable_self_calib = True
+            init_params.enable_image_enhancement = True
+            init_params.sdk_verbose = 1
+
+            status = self._zed.open(init_params)
+            if status == sl.ERROR_CODE.SUCCESS:
+                return True
+
+            time.sleep(0.5)
+
+        return False
+
+    def open(self, verbose: bool = False):
+        if verbose:
+            print("[DEBUG] Opening ZED camera...")
+        
+        sl, _cv2, _np = self._try_import_dependencies(verbose=verbose)
+        if not sl:
+            if verbose:
+                print("[DEBUG] Failed to import dependencies")
+            return False
+
+        self._sl = sl
+        self._zed = sl.Camera()
+        if verbose:
+            print("[DEBUG] Camera object created, attempting to open...")
+        
+        if not self._try_open_camera_with_fallbacks():
+            if verbose:
+                print("[DEBUG] Failed to open camera with fallback attempts")
+            return False
+
+        if verbose:
+            print("[DEBUG] Camera opened, enabling positional tracking...")
+        
+        tracking_params = sl.PositionalTrackingParameters()
+        status = self._zed.enable_positional_tracking(tracking_params)
+        if status != sl.ERROR_CODE.SUCCESS:
+            if verbose:
+                print(f"[DEBUG] Failed to enable positional tracking: {status}")
+            self.close()
+            return False
+
+        if verbose:
+            print("[DEBUG] Positional tracking enabled, enabling object detection...")
+        
+        detection_model_map = {
+            "fast": sl.OBJECT_DETECTION_MODEL.MULTI_CLASS_BOX_FAST,
+            "medium": sl.OBJECT_DETECTION_MODEL.MULTI_CLASS_BOX_MEDIUM,
+            "accurate": sl.OBJECT_DETECTION_MODEL.MULTI_CLASS_BOX_ACCURATE,
+        }
+
+        detection_params = sl.ObjectDetectionParameters()
+        detection_params.enable_tracking = True
+        detection_params.enable_segmentation = False
+        detection_params.detection_model = detection_model_map.get(
+            self.model, sl.OBJECT_DETECTION_MODEL.MULTI_CLASS_BOX_MEDIUM
+        )
+
+        status = self._zed.enable_object_detection(detection_params)
+        if status != sl.ERROR_CODE.SUCCESS:
+            if verbose:
+                print(f"[DEBUG] Failed to enable object detection: {status}")
+            self.close()
+            return False
+
+        self._runtime_params = sl.RuntimeParameters()
+        self._detection_runtime = sl.ObjectDetectionRuntimeParameters()
+        self._detection_runtime.detection_confidence_threshold = self.confidence
+
+        self._objects = sl.Objects()
+        self._point_cloud = sl.Mat()
+        self._left_image = sl.Mat()
+        self._depth_map = sl.Mat()
+        
+        if verbose:
+            print("[DEBUG] ZED camera fully initialized")
+        
+        return True
+
+    def _zed_rgba_to_bgr(self, image_mat):
+        _sl, cv2, _np = self._try_import_dependencies(verbose=False)
+        if cv2 is None:
+            return None
+        rgba = image_mat.get_data()
+        return cv2.cvtColor(rgba, cv2.COLOR_BGRA2BGR)
+
+    def _depth_to_colormap(self, depth_mat, max_depth_m=8.0):
+        _sl, cv2, np = self._try_import_dependencies(verbose=False)
+        if cv2 is None or np is None:
+            return None
+        depth = depth_mat.get_data()
+        depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
+        depth = np.clip(depth, 0.0, max_depth_m)
+        depth_8u = np.uint8((depth / max_depth_m) * 255.0)
+        return cv2.applyColorMap(depth_8u, cv2.COLORMAP_TURBO)
+
+    def read(self):
+        if not self._zed:
+            return None
+
+        sl = self._sl
+        if self._zed.grab(self._runtime_params) != sl.ERROR_CODE.SUCCESS:
+            return None
+
+        self._frame_index += 1
+
+        self._zed.retrieve_objects(self._objects, self._detection_runtime)
+        self._zed.retrieve_measure(self._point_cloud, sl.MEASURE.XYZRGBA, sl.MEM.CPU)
+        self._zed.retrieve_image(self._left_image, sl.VIEW.LEFT, sl.MEM.CPU)
+        self._zed.retrieve_measure(self._depth_map, sl.MEASURE.DEPTH, sl.MEM.CPU)
+
+        rgb_frame = self._zed_rgba_to_bgr(self._left_image)
+        depth_frame = self._depth_to_colormap(self._depth_map)
+
+        frame_payload = {
+            "timestamp_unix": time.time(),
+            "frame_index": self._frame_index,
+            "detections": [],
+        }
+
+        for obj in self._objects.object_list:
+            position = obj.position
+            x, y, z = float(position[0]), float(position[1]), float(position[2])
+
+            if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(z)):
+                cx, cy = center_from_bbox_2d(obj.bounding_box_2d)
+                fallback = safe_point_at_pixel(self._point_cloud, sl, cx, cy)
                 if fallback is not None:
                     x, y, z = fallback
                 else:

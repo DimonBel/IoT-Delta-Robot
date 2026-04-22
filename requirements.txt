@@ -16,3 +16,4 @@ uvicorn==0.44.0
 numpy
 opencv-python
 Flask
+ultralytics
