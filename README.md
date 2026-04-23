@@ -1,6 +1,6 @@
 ## IoT Delta Robot
 
-***
+### Running the code
 
 ## Vision Coordinates & YOLO Object Detection Logic
 
@@ -73,3 +73,23 @@ Here are some helpful commands to test and debug the vision system from the term
 - pyzed is provided exclusively by the physical ZED SDK installer (do NOT pip install pyzed).
 - You must install requirements: pip install -r requirements.txt (which brings in ultralytics for YOLO, 
 umpy, and opencv-python).
+**Prerequisites:** Python 3.8+
+
+```bash
+python -m venv .venv
+
+source .venv/bin/activate   # for MacOS/Linux
+
+.venv\Scripts\activate      # for Windows
+
+pip install -r requirements.txt
+```
+
+**Run the FastAPI server:**
+```bash
+# From the project root directory
+uvicorn main.main:app --reload
+```
+
+**Access the web UI:**
+Open your browser and navigate to `http://localhost:8000`
