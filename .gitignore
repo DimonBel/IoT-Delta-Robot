@@ -4,3 +4,16 @@
 __pycache__
 *.pyc
 *.whl
+
+# Personal notes / scratch (Sergio)
+Sergio/
+
+# Per-deployment calibration artefacts (regenerated on the target machine)
+calibration/calibration.json
+calibration/*.png
+
+# Local calibration photos (kept locally, not committed)
+tests/photo_*.jpg
+tests/photo_*.jpeg
+tests/photo_*.png
+samples/
