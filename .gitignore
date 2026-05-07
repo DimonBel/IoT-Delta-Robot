@@ -4,3 +4,10 @@
 __pycache__
 *.pyc
 *.whl
+*.pt
+
+# Vision generated artifacts
+outputs/
+vision_outputs/
+*.svo
+*.svo2
