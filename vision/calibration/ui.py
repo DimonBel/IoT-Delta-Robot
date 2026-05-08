@@ -86,7 +86,9 @@ def _grab_live_frame():
         frame = vision.get_frame()
         if frame is None:
             raise RuntimeError("ZED returned no frame.")
-        rgb = frame.get("annotated_rgb") or frame.get("rgb")
+        rgb = frame.get("annotated_rgb")
+        if rgb is None:
+            rgb = frame.get("rgb")
         if rgb is None:
             raise RuntimeError("ZED frame had no RGB image.")
         return rgb
@@ -259,7 +261,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         choices=[1, 2, 3],
-        help="Polynomial degree (default: auto, 2 below 16 points, 3 above)",
+        help=(
+            "Polynomial degree (default: auto; 1 for <6 points, "
+            "2 for 6-15 points, 3 for >=16 points)"
+        ),
     )
     p.add_argument(
         "--result-image",

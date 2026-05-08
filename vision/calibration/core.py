@@ -234,6 +234,10 @@ def fit_polynomial(points: Sequence[CalibrationPoint], degree: int = 2) -> PolyF
 
 
 def auto_select_degree(n_points: int) -> int:
+    # Keep the fit solvable for small click sets:
+    #   poly1 needs 3 terms, poly2 needs 6, poly3 needs 10.
+    if n_points < 6:
+        return 1
     if n_points >= 16:
         return 3
     return 2

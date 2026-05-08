@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import time
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Sequence
 
@@ -15,6 +17,26 @@ from vision.vision import ImageRecognition
 
 
 DEFAULT_CALIBRATION_PATH = "calibration/calibration.json"
+
+
+def _expand_image_inputs(image_paths: Iterable[str]) -> list[str]:
+    """Expand wildcard image arguments in a cross-shell way."""
+    expanded: list[str] = []
+    for p in image_paths:
+        matches = glob.glob(p)
+        if matches:
+            expanded.extend(matches)
+        else:
+            expanded.append(p)
+    # Deduplicate while preserving order.
+    seen = set()
+    ordered: list[str] = []
+    for p in expanded:
+        if p in seen:
+            continue
+        seen.add(p)
+        ordered.append(p)
+    return ordered
 
 
 def _annotate_board_mm(
@@ -252,7 +274,9 @@ def capture_and_save_snapshot(
         if frame_data is None:
             print("ERROR: No frame available from camera")
             return False
-        image = frame_data.get("annotated_rgb") or frame_data.get("rgb")
+        image = frame_data.get("annotated_rgb")
+        if image is None:
+            image = frame_data.get("rgb")
         if image is None:
             print("ERROR: Frame has no image content")
             return False
@@ -269,6 +293,108 @@ def capture_and_save_snapshot(
         vision.stop()
 
 
+def capture_object_snapshots_for_inspection(
+    output_dir: str,
+    target_count: int = 25,
+    max_frames: int = 300,
+    confidence_threshold: int = 40,
+    model: str = "medium",
+    algorithm: str = "yolo",
+    debug: bool = False,
+) -> int:
+    """Capture a dataset of snapshots that contain at least one detected object.
+
+    Saves per sample:
+      - <stem>.jpg              raw frame (clean, no overlays — best for re-inference)
+      - <stem>_annotated.jpg    annotated frame (boxes + work-zone polygon)
+      - <stem>.json             detections + frame metadata
+    Returns the number of saved snapshots.
+    """
+    try:
+        import cv2
+    except ImportError:
+        print("ERROR: OpenCV not installed. Install with: pip install opencv-python")
+        return 0
+
+    target_count = max(1, int(target_count))
+    max_frames = max(target_count, int(max_frames))
+
+    base_dir = Path(output_dir)
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    vision = ImageRecognition(
+        confidence=confidence_threshold,
+        model=model,
+        algorithm=algorithm,
+        auto_start=True,
+        debug=debug,
+    )
+    if not vision._zed_enabled:
+        print("ERROR: Could not initialize ZED camera")
+        return 0
+
+    saved = 0
+    seen = 0
+    try:
+        while saved < target_count and seen < max_frames:
+            seen += 1
+            frame_data = vision.get_frame()
+            if frame_data is None:
+                continue
+
+            payload = frame_data.get("payload", {}) or {}
+            detections = payload.get("detections", []) or []
+            if not detections:
+                continue
+
+            raw_image = frame_data.get("rgb")
+            annotated_image = frame_data.get("annotated_rgb")
+            if raw_image is None and annotated_image is None:
+                continue
+
+            stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S_%f")
+            stem = f"obj_{saved + 1:04d}_{stamp}"
+            image_path = base_dir / f"{stem}.jpg"
+            annotated_path = base_dir / f"{stem}_annotated.jpg"
+            json_path = base_dir / f"{stem}.json"
+
+            primary = raw_image if raw_image is not None else annotated_image
+            if not bool(cv2.imwrite(str(image_path), primary)):
+                continue
+            if annotated_image is not None and raw_image is not None:
+                cv2.imwrite(str(annotated_path), annotated_image)
+
+            snapshot_meta = {
+                "saved_at_unix": time.time(),
+                "saved_from_frame_index": payload.get("frame_index"),
+                "timestamp_unix": payload.get("timestamp_unix"),
+                "detection_count": len(detections),
+                "detections": detections,
+                "image_path": str(image_path),
+                "annotated_image_path": (
+                    str(annotated_path)
+                    if annotated_image is not None and raw_image is not None
+                    else None
+                ),
+            }
+            with json_path.open("w", encoding="utf-8") as f:
+                json.dump(snapshot_meta, f, indent=2)
+
+            saved += 1
+            print(
+                f"[{saved}/{target_count}] saved {image_path.name} "
+                f"({len(detections)} detections)"
+            )
+    finally:
+        vision.stop()
+
+    print(
+        f"Finished dataset capture: saved={saved}, "
+        f"frames_seen={seen}, folder={base_dir}"
+    )
+    return saved
+
+
 def inspect_snapshot_images(
     image_paths: Iterable[str],
     confidence: int = 35,
@@ -276,7 +402,7 @@ def inspect_snapshot_images(
     json_out: str = "",
 ) -> int:
     """Run snapshot inspector on one or more images."""
-    images = [str(Path(p)) for p in image_paths]
+    images = [str(Path(p)) for p in _expand_image_inputs(image_paths)]
     missing = [p for p in images if not Path(p).is_file()]
     if missing:
         print("ERROR: file not found:", ", ".join(missing))
@@ -291,6 +417,60 @@ def inspect_snapshot_images(
     print("Snapshot inspection summary")
     print("  images:", len(images))
     print("  produce detections (items):", report.get("item_count", 0))
+
+    if json_out:
+        output = Path(json_out)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with output.open("w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
+        print(f"Wrote {output}")
+    return 0
+
+
+def categorize_snapshot_images(
+    image_paths: Iterable[str],
+    confidence: int = 35,
+    model: str = "medium",
+    unclear_confidence_pct: float = 45.0,
+    json_out: str = "",
+    crops_dir: str = "",
+    use_sidecar: bool = True,
+) -> int:
+    """Categorize snapshot detections into good/bad/unclear/person/other_object.
+
+    By default, when an image was produced by the dataset capture command, its
+    sibling `<stem>.json` is used as the source of detections (those benefit
+    from the calibrated work-zone crop and tend to find small fruit). Pass
+    `use_sidecar=False` to force a fresh full-frame YOLO pass.
+    """
+    images = [str(Path(p)) for p in _expand_image_inputs(image_paths)]
+    missing = [p for p in images if not Path(p).is_file()]
+    if missing:
+        print("ERROR: file not found:", ", ".join(missing))
+        return 1
+
+    inspector = SnapshotProduceInspector(confidence=confidence, model=model)
+    report = inspector.categorize(
+        images=images,
+        unclear_confidence_pct=unclear_confidence_pct,
+        prefer_sidecar=use_sidecar,
+        crops_dir=crops_dir or None,
+    )
+    if not report.get("ok"):
+        print("ERROR:", report.get("error", "unknown"))
+        return 1
+
+    counts = report.get("counts", {}) or {}
+    print("Snapshot categorization summary")
+    print("  images:", len(images))
+    print("  detections:", report.get("item_count", 0))
+    print("  good:", counts.get("good", 0))
+    print("  bad:", counts.get("bad", 0))
+    print("  unclear:", counts.get("unclear", 0))
+    print("  person:", counts.get("person", 0))
+    print("  other_object:", counts.get("other_object", 0))
+    if report.get("crops_dir"):
+        print("  crops_dir:", report["crops_dir"])
 
     if json_out:
         output = Path(json_out)
@@ -331,11 +511,43 @@ def main() -> int:
     snap.add_argument("--algorithm", default="yolo", choices=["yolo", "zed"])
     snap.add_argument("--debug", action="store_true")
 
+    collect = sub.add_parser(
+        "snapshot-dataset",
+        help="Capture multiple snapshots that contain detected objects",
+    )
+    collect.add_argument("--output-dir", required=True)
+    collect.add_argument("--count", type=int, default=25)
+    collect.add_argument("--max-frames", type=int, default=300)
+    collect.add_argument("--confidence", type=int, default=40)
+    collect.add_argument("--model", default="medium")
+    collect.add_argument("--algorithm", default="yolo", choices=["yolo", "zed"])
+    collect.add_argument("--debug", action="store_true")
+
     inspect = sub.add_parser("inspect", help="Run snapshot produce inspection")
     inspect.add_argument("--images", nargs="+", required=True)
     inspect.add_argument("--confidence", type=int, default=35)
     inspect.add_argument("--model", default="medium")
     inspect.add_argument("--json-out", default="")
+
+    categorize = sub.add_parser(
+        "categorize",
+        help="Categorize detections: good/bad/unclear/person/other_object",
+    )
+    categorize.add_argument("--images", nargs="+", required=True)
+    categorize.add_argument("--confidence", type=int, default=35)
+    categorize.add_argument("--model", default="medium")
+    categorize.add_argument("--unclear-confidence", type=float, default=45.0)
+    categorize.add_argument("--json-out", default="")
+    categorize.add_argument(
+        "--crops-dir",
+        default="",
+        help="Save per-detection crops into category subfolders here.",
+    )
+    categorize.add_argument(
+        "--no-sidecar",
+        action="store_true",
+        help="Ignore <stem>.json sidecars and run YOLO on the full image.",
+    )
 
     args = parser.parse_args()
 
@@ -359,6 +571,27 @@ def main() -> int:
             algorithm=args.algorithm,
             debug=args.debug,
         ) else 1
+    if args.command == "snapshot-dataset":
+        saved = capture_object_snapshots_for_inspection(
+            output_dir=args.output_dir,
+            target_count=args.count,
+            max_frames=args.max_frames,
+            confidence_threshold=args.confidence,
+            model=args.model,
+            algorithm=args.algorithm,
+            debug=args.debug,
+        )
+        return 0 if saved > 0 else 1
+    if args.command == "categorize":
+        return categorize_snapshot_images(
+            image_paths=args.images,
+            confidence=args.confidence,
+            model=args.model,
+            unclear_confidence_pct=args.unclear_confidence,
+            json_out=args.json_out,
+            crops_dir=args.crops_dir,
+            use_sidecar=not args.no_sidecar,
+        )
     return inspect_snapshot_images(
         image_paths=args.images,
         confidence=args.confidence,

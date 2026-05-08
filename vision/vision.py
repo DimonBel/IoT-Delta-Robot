@@ -536,9 +536,10 @@ class ZEDYoloVisionPipeline(ZEDCoordinateVisionPipeline):
         self._support_plane_mode = "hit"
         self._last_floor_plane = None
         self._last_floor_plane_ts = 0.0
-        # Throughput-focused defaults for real-time operation.
-        self._yolo_inference_every_n_frames = 3
-        self._yolo_image_size = 320
+        # Real-time defaults: every frame inference at a small input size so the
+        # YOLO step stays under one ZED frame budget (~33 ms at 30 FPS).
+        self._yolo_inference_every_n_frames = 1
+        self._yolo_image_size = 416
         self._enable_depth_preview = False
         self._enable_support_plane = False
         self._last_detections = []
@@ -549,6 +550,15 @@ class ZEDYoloVisionPipeline(ZEDCoordinateVisionPipeline):
         self._board_initialized = False
         self._board_quad_corners = None
         self._board_lock_min_confidence = 45.0
+        # Calibration ROI: if a calibration JSON is found, YOLO inference is
+        # restricted to the polygon clicked by the operator (the work square).
+        # This both improves recall on small/distant objects inside the work
+        # zone (the model sees that area at a higher effective resolution) and
+        # speeds up inference (less pixels to process).
+        self._calibration_path = "calibration/calibration.json"
+        self._calib_polygon_xy = None
+        self._calib_crop_xyxy = None
+        self._calib_padding_px = 24
 
     def _resolve_yolo_model_name(self):
         # By default, use heavier models for better fruit recognition if predefined alias is used,
@@ -634,6 +644,12 @@ class ZEDYoloVisionPipeline(ZEDCoordinateVisionPipeline):
         if self._board_initialized and self._board_quad_corners is not None and self._np is not None:
             pts = self._board_quad_corners.reshape(-1, 1, 2).astype(int)
             self._cv2.polylines(overlay, [pts], isClosed=True, color=(0, 255, 255), thickness=2)
+
+        # Draw the calibrated work-zone polygon (cyan) so the operator can see
+        # the area where pickable detections are accepted.
+        if self._calib_polygon_xy is not None and self._np is not None:
+            poly = self._calib_polygon_xy.reshape(-1, 1, 2).astype(int)
+            self._cv2.polylines(overlay, [poly], isClosed=True, color=(255, 255, 0), thickness=2)
 
         return overlay
 
@@ -726,10 +742,97 @@ class ZEDYoloVisionPipeline(ZEDCoordinateVisionPipeline):
         self._left_image = sl.Mat()
         self._depth_map = sl.Mat()
 
+        self._load_calibration_roi(verbose=verbose)
+
         if verbose:
             print("[DEBUG] YOLO + ZED pipeline initialized")
 
         return True
+
+    def _load_calibration_roi(self, verbose: bool = False):
+        """Load saved calibration and turn the clicked points into an ROI.
+
+        Sets:
+            self._calib_polygon_xy : numpy (N, 2) float polygon in image space.
+            self._calib_crop_xyxy  : (x1, y1, x2, y2) crop bbox with padding.
+        """
+        if self._np is None:
+            return
+        try:
+            from vision.calibration import load_calibration
+        except Exception:
+            return
+        path = self._calibration_path
+        if not path or not os.path.isfile(path):
+            if verbose:
+                print(f"[DEBUG] No calibration at {path}; using full frame")
+            return
+        try:
+            cal = load_calibration(path)
+        except Exception as e:
+            if verbose:
+                print(f"[DEBUG] Failed to load calibration: {e}")
+            return
+
+        pts = [(float(p.u), float(p.v)) for p in cal.points]
+        if len(pts) < 3:
+            return
+
+        polygon = self._np.array(pts, dtype=self._np.float32)
+        # Order points around the convex hull so cv2.pointPolygonTest gets a
+        # well-formed polygon (operator click order may not be CCW/CW).
+        if self._cv2 is not None:
+            try:
+                hull = self._cv2.convexHull(polygon)
+                polygon = hull.reshape(-1, 2).astype(self._np.float32)
+            except Exception:
+                pass
+
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        pad = int(self._calib_padding_px)
+        x1 = max(0, int(min(xs)) - pad)
+        y1 = max(0, int(min(ys)) - pad)
+        x2 = int(max(xs)) + pad
+        y2 = int(max(ys)) + pad
+
+        self._calib_polygon_xy = polygon
+        self._calib_crop_xyxy = (x1, y1, x2, y2)
+        if verbose:
+            print(
+                f"[DEBUG] Calibration ROI loaded: crop=({x1},{y1})->({x2},{y2}) "
+                f"pts={len(pts)}"
+            )
+
+    def _crop_to_calibration_roi(self, frame):
+        """Return (yolo_input, x_off, y_off). If no ROI, return original frame."""
+        if self._calib_crop_xyxy is None:
+            return frame, 0, 0
+        h, w = frame.shape[:2]
+        x1, y1, x2, y2 = self._calib_crop_xyxy
+        x1 = max(0, min(w - 1, int(x1)))
+        y1 = max(0, min(h - 1, int(y1)))
+        x2 = max(x1 + 1, min(w, int(x2)))
+        y2 = max(y1 + 1, min(h, int(y2)))
+        if x2 - x1 < 64 or y2 - y1 < 64:
+            return frame, 0, 0
+        return frame[y1:y2, x1:x2], x1, y1
+
+    def _bbox_in_calibration_polygon(self, x1: int, y1: int, x2: int, y2: int) -> bool:
+        """Return True if the bbox center sits inside the calibration polygon.
+
+        When no calibration is loaded, every detection counts as in zone.
+        """
+        if self._calib_polygon_xy is None or self._cv2 is None:
+            return True
+        cx = float((x1 + x2) / 2)
+        cy = float((y1 + y2) / 2)
+        try:
+            return self._cv2.pointPolygonTest(
+                self._calib_polygon_xy, (cx, cy), False
+            ) >= 0
+        except Exception:
+            return True
 
     def _detect_support_plane(self, sl, pixel_x, pixel_y):
         # Prefer local plane at hit point under the detected object.
@@ -783,11 +886,13 @@ class ZEDYoloVisionPipeline(ZEDCoordinateVisionPipeline):
         )
 
         yolo_results = []
+        crop_off_x, crop_off_y = 0, 0
         if should_run_yolo:
             self._zed.retrieve_measure(self._point_cloud, sl.MEASURE.XYZRGBA, sl.MEM.CPU)
+            yolo_input, crop_off_x, crop_off_y = self._crop_to_calibration_roi(rgb_frame)
             try:
                 yolo_results = self._yolo.predict(
-                    source=rgb_frame,
+                    source=yolo_input,
                     conf=max(0.01, min(0.99, self.confidence / 100.0)),
                     imgsz=self._yolo_image_size,
                     device=self._yolo_device,
@@ -825,8 +930,20 @@ class ZEDYoloVisionPipeline(ZEDCoordinateVisionPipeline):
                     conf = float(box.conf[0]) * 100.0 if box.conf is not None else 0.0
                     xyxy = box.xyxy[0].tolist() if box.xyxy is not None else [0, 0, 0, 0]
                     x1, y1, x2, y2 = [int(v) for v in xyxy]
+                    # Remap from cropped ROI back to full-frame coordinates.
+                    x1 += crop_off_x
+                    x2 += crop_off_x
+                    y1 += crop_off_y
+                    y2 += crop_off_y
                     foot_x = int((x1 + x2) / 2)
                     foot_y = int(y2)
+
+                    in_zone = self._bbox_in_calibration_polygon(x1, y1, x2, y2)
+                    # Drop produce/object detections outside the work zone so the
+                    # robot ignores random items in the room. Humans always pass
+                    # through for safety overlay.
+                    if not in_zone and detection_type not in ("human",):
+                        continue
 
                     fallback = safe_point_at_pixel(self._point_cloud, sl, foot_x, foot_y)
                     if fallback is None:
@@ -854,6 +971,7 @@ class ZEDYoloVisionPipeline(ZEDCoordinateVisionPipeline):
                         },
                         "distance_m": to_builtin_float(distance),
                         "bbox_xyxy": [x1, y1, x2, y2],
+                        "in_work_zone": bool(in_zone),
                         "produce_kind": final_label if detection_type == "produce" else None,
                         "support_plane": support_plane,
                     }

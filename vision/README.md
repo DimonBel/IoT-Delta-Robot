@@ -112,10 +112,32 @@ Run from repository root.
 - Command:
   - `python -m vision.commands snapshot --output outputs/snapshots/frame_001.jpg --model medium --confidence 40`
 
+### Capture a snapshot dataset (only frames with detected objects)
+
+- Command:
+  - `python -m vision.commands snapshot-dataset --output-dir outputs/snapshot_inspection --count 50 --max-frames 600 --model medium --confidence 35`
+- Output per sample:
+  - `<name>.jpg` (annotated frame)
+  - `<name>.json` (detections + frame metadata)
+
 ### Inspect existing still images
 
 - Command:
   - `python -m vision.commands inspect --images samples/a.jpg samples/b.jpg --model medium --confidence 35 --json-out outputs/reports/inspection.json`
+
+### Categorize objects in snapshots (good/bad/unclear/person/other_object)
+
+- Command:
+  - `python -m vision.commands categorize --images outputs/snapshot_inspection/*.jpg --model medium --confidence 35 --unclear-confidence 45 --crops-dir outputs/snapshot_inspection/crops --json-out outputs/reports/categorization.json`
+- Categories:
+  - `good`: produce likely acceptable
+  - `bad`: produce likely poor quality/spoilage
+  - `unclear`: low confidence or unknown produce kind
+  - `person`: human detection
+  - `other_object`: non-produce objects (robot, board, misc objects)
+- Behaviour:
+  - When the dataset capture wrote a `<stem>.json` sidecar next to the image, those detections (already vetted by the calibrated work-zone YOLO pass) are used. Pass `--no-sidecar` to force a fresh full-frame inference.
+  - `--crops-dir DIR` saves per-detection crops into `DIR/<category>/...jpg` for fast visual review and dataset prep.
 
 ## 3) Backward-compatible test wrappers
 
