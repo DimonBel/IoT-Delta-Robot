@@ -18,12 +18,12 @@ dark-blob check on top (out of scope for this PR).
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, MutableMapping, Optional, Sequence
 
 from vision.snapshot_inspection import (
-    _defect_hints_from_label_and_vision,
-    _hsv_means_bgr,
+    defect_hints_from_label_and_vision,
     fuzzy_quality_fusion,
+    hsv_means_bgr,
 )
 
 
@@ -52,7 +52,7 @@ def _bbox_crop(rgb_frame, bbox_xyxy):
 
 
 def grade_detection(
-    detection: Mapping[str, Any],
+    detection: MutableMapping[str, Any],
     rgb_frame,
 ) -> Optional[dict]:
     """Compute a fuzzy quality grade for one produce detection in-place.
@@ -67,15 +67,12 @@ def grade_detection(
         }
 
     Returns the same dict, or None for non-produce detections / missing
-    bbox / empty crop.
+    bbox / empty crop. Untyped detections (no `detection_type` set, e.g.
+    raw YOLO output not yet classified) are graded leniently.
     """
-    if not isinstance(detection, Mapping):
+    detection_type = detection.get("detection_type")
+    if detection_type is not None and detection_type != "produce":
         return None
-    if detection.get("detection_type") not in ("produce", None):
-        # Only grade things classified as produce. Untyped detections
-        # (e.g. raw YOLO output not yet classified) are graded leniently.
-        if detection.get("detection_type") is not None:
-            return None
 
     bbox = detection.get("bbox_xyxy")
     if not isinstance(bbox, Sequence):
@@ -87,8 +84,8 @@ def grade_detection(
     label = str(detection.get("label") or "")
     confidence = float(detection.get("confidence") or 0.0)
 
-    hsv = _hsv_means_bgr(crop)
-    defect_score, issues = _defect_hints_from_label_and_vision(
+    hsv = hsv_means_bgr(crop)
+    defect_score, issues = defect_hints_from_label_and_vision(
         label, confidence, hsv
     )
     fuzzy = fuzzy_quality_fusion(defect_score, max(0.0, min(1.0, confidence / 100.0)))
@@ -100,8 +97,5 @@ def grade_detection(
         "memberships": fuzzy["memberships"],
         "hsv": hsv,
     }
-    # Type the cast through dict() so callers can rely on plain dict semantics.
-    if not isinstance(detection, dict):
-        return quality
     detection["quality"] = quality
     return quality

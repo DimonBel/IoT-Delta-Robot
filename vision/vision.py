@@ -548,9 +548,10 @@ class ZEDYoloVisionPipeline(ZEDCoordinateVisionPipeline):
         self._support_plane_mode = "hit"
         self._last_floor_plane = None
         self._last_floor_plane_ts = 0.0
-        # Real-time defaults: every frame inference. Default imgsz is 640 to
-        # improve recall on small/distant produce; bump higher (e.g. 832/1280)
-        # when the GPU has headroom, or pass a smaller value for headless CPU.
+        # YOLO runs every frame. Default imgsz is 640 to recover small/distant
+        # produce — that's a recall-vs-latency trade vs the older 416 default.
+        # On CPU you may drop below 30 FPS; pass `imgsz=416` (or smaller) to
+        # restore the previous budget. Bump to 832/1280 when GPU has headroom.
         self._yolo_inference_every_n_frames = 1
         self._yolo_image_size = max(96, int(imgsz))
         self._enhance_low_light = bool(enhance_low_light)
@@ -601,8 +602,9 @@ class ZEDYoloVisionPipeline(ZEDCoordinateVisionPipeline):
             clahe = self._cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
             l = clahe.apply(l)
             return self._cv2.cvtColor(self._cv2.merge((l, a, b)), self._cv2.COLOR_LAB2BGR)
-        except Exception:
-            # Never let preprocessing break the live loop.
+        except getattr(self._cv2, "error", Exception):
+            # cv2 itself raised on a malformed frame (wrong dtype/shape).
+            # Skip preprocessing and continue rather than crash the loop.
             return image_bgr
 
     def _try_import_yolo_dependencies(self, verbose: bool = False):

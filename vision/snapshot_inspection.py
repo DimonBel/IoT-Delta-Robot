@@ -69,7 +69,7 @@ def fuzzy_quality_fusion(
     }
 
 
-def _hsv_means_bgr(bgr: np.ndarray) -> Optional[Dict[str, float]]:
+def hsv_means_bgr(bgr: np.ndarray) -> Optional[Dict[str, float]]:
     try:
         cv2 = importlib.import_module("cv2")
     except Exception:
@@ -81,7 +81,7 @@ def _hsv_means_bgr(bgr: np.ndarray) -> Optional[Dict[str, float]]:
     return {"mean_h": float(m[0]), "mean_s": float(m[1]), "mean_v": float(m[2])}
 
 
-def _defect_hints_from_label_and_vision(
+def defect_hints_from_label_and_vision(
     label: str,
     conf_pct: float,
     hsv: Optional[Dict[str, float]],
@@ -219,8 +219,8 @@ class SnapshotProduceInspector:
                 if x2 <= x1 or y2 <= y1:
                     continue
                 crop = bgr[y1:y2, x1:x2]
-                hsv = _hsv_means_bgr(crop)
-                defect, issues = _defect_hints_from_label_and_vision(
+                hsv = hsv_means_bgr(crop)
+                defect, issues = defect_hints_from_label_and_vision(
                     canonical or src_label, conf_pct, hsv
                 )
                 fuzzy = fuzzy_quality_fusion(defect, conf_pct / 100.0)
@@ -261,8 +261,8 @@ class SnapshotProduceInspector:
         """Run quality analysis on a produce crop and assign category."""
         x1, y1, x2, y2 = bbox
         crop = bgr[y1:y2, x1:x2]
-        hsv = _hsv_means_bgr(crop)
-        defect, issues = _defect_hints_from_label_and_vision(
+        hsv = hsv_means_bgr(crop)
+        defect, issues = defect_hints_from_label_and_vision(
             canonical or src_label, conf_pct, hsv
         )
         fuzzy = fuzzy_quality_fusion(defect, conf_pct / 100.0)

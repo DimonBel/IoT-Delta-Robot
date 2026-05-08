@@ -80,10 +80,10 @@ def _annotate_quality(
 ) -> None:
     """Add `quality` to every produce detection in-place via fuzzy grading.
 
-    Reuses vision.quality.grade_detection (which composes the colleague's
-    snapshot-side helpers). On any unexpected failure, the detection gets
-    `quality = {"grade": "unknown", "error": "grade_failed"}` so the live
-    loop never crashes on a flaky frame.
+    Reuses vision.quality.grade_detection. Catches the data-shape errors a
+    bad frame can produce (bbox/crop/HSV) so the live loop never crashes,
+    while letting real defects (NameError, AttributeError, ImportError)
+    bubble up so they don't hide silently.
     """
     if rgb_frame is None:
         return
@@ -92,8 +92,12 @@ def _annotate_quality(
             continue
         try:
             grade_detection(d, rgb_frame)
-        except Exception:
-            d["quality"] = {"grade": "unknown", "error": "grade_failed"}
+        except (ValueError, TypeError, IndexError) as exc:
+            d["quality"] = {
+                "grade": "unknown",
+                "error": "grade_failed",
+                "error_kind": type(exc).__name__,
+            }
 
 
 def _fmt_meters(value: Any) -> str:
