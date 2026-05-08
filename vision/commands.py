@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Sequence
 
 from vision.calibration import Calibrator, detection_center
+from vision.quality import grade_detection
 from vision.snapshot_inspection import SnapshotProduceInspector
 from vision.vision import ImageRecognition
 
@@ -73,6 +74,28 @@ def _annotate_board_mm(
         }
 
 
+def _annotate_quality(
+    detections: Sequence[Dict[str, Any]],
+    rgb_frame,
+) -> None:
+    """Add `quality` to every produce detection in-place via fuzzy grading.
+
+    Reuses vision.quality.grade_detection (which composes the colleague's
+    snapshot-side helpers). On any unexpected failure, the detection gets
+    `quality = {"grade": "unknown", "error": "grade_failed"}` so the live
+    loop never crashes on a flaky frame.
+    """
+    if rgb_frame is None:
+        return
+    for d in detections:
+        if d.get("detection_type") != "produce":
+            continue
+        try:
+            grade_detection(d, rgb_frame)
+        except Exception:
+            d["quality"] = {"grade": "unknown", "error": "grade_failed"}
+
+
 def _fmt_meters(value: Any) -> str:
     try:
         if value is None:
@@ -84,7 +107,7 @@ def _fmt_meters(value: Any) -> str:
 
 def run_live_vision(
     duration_seconds: int = 0,
-    confidence_threshold: int = 40,
+    confidence_threshold: int = 25,
     model: str = "medium",
     algorithm: str = "yolo",
     skip_display: bool = False,
@@ -92,8 +115,18 @@ def run_live_vision(
     print_coordinates: bool = False,
     calibration_required: bool = True,
     calibration_path: str = DEFAULT_CALIBRATION_PATH,
+    imgsz: int = 640,
+    enhance_low_light: bool = False,
+    quality_enabled: bool = True,
+    person_min_confidence: int = 40,
 ) -> bool:
     """Run live vision loop and optional display.
+
+    Defaults are tuned for "see small fruit at distance":
+      - confidence_threshold=25 (people are gated separately at person_min_confidence)
+      - imgsz=640 for sharper small-object recall
+      - enhance_low_light=False (opt in via the --enhance CLI flag)
+      - quality_enabled=True attaches a fuzzy quality grade to produce detections
 
     When `calibration_required` is True (default), a saved calibration JSON is
     loaded once at startup and each detection is annotated with `board_xy_mm`
@@ -122,13 +155,22 @@ def run_live_vision(
             f"RMS {cal.fit.rms_residual_mm:.2f} mm"
         )
 
-    print("Initializing vision system...")
+    print(
+        f"Initializing vision system... "
+        f"(imgsz={imgsz}, conf>={confidence_threshold}%, "
+        f"person>={person_min_confidence}%, "
+        f"enhance={'on' if enhance_low_light else 'off'}, "
+        f"quality={'on' if quality_enabled else 'off'})"
+    )
     vision = ImageRecognition(
         confidence=confidence_threshold,
         model=model,
         algorithm=algorithm,
         auto_start=True,
         debug=debug,
+        imgsz=imgsz,
+        enhance_low_light=enhance_low_light,
+        person_min_confidence=person_min_confidence,
     )
 
     if not vision._zed_enabled:
@@ -175,6 +217,11 @@ def run_live_vision(
                     h_img, w_img = ref.shape[:2]
                     _annotate_board_mm(detections, calibrator, (w_img, h_img))
 
+            if quality_enabled and detections:
+                ref = rgb_frame if rgb_frame is not None else annotated_frame
+                if ref is not None:
+                    _annotate_quality(detections, ref)
+
             if detections:
                 stats["frames_with_detections"] += 1
                 stats["total_detections"] += len(detections)
@@ -209,6 +256,14 @@ def run_live_vision(
                         )
                     elif "error" in bxy:
                         print(f"  board (mm): {bxy['error']}")
+                    quality = best.get("quality") or {}
+                    if quality.get("grade"):
+                        top_issue = (quality.get("issues") or [None])[0]
+                        suffix = f" [{top_issue}]" if top_issue else ""
+                        print(
+                            f"  quality: {quality['grade']} "
+                            f"(defect {quality.get('defect_score', 0.0):.2f}){suffix}"
+                        )
 
             if not skip_display and (annotated_frame is not None or rgb_frame is not None):
                 display_frame = annotated_frame if annotated_frame is not None else rgb_frame
@@ -487,7 +542,10 @@ def main() -> int:
 
     live = sub.add_parser("live", help="Run live ZED+YOLO stream")
     live.add_argument("--duration", type=int, default=0)
-    live.add_argument("--confidence", type=int, default=40)
+    live.add_argument(
+        "--confidence", type=int, default=25,
+        help="Min YOLO confidence in %% (default 25; people gated separately at --person-min-confidence)",
+    )
     live.add_argument("--model", default="medium")
     live.add_argument("--algorithm", default="yolo", choices=["yolo", "zed"])
     live.add_argument("--no-display", action="store_true")
@@ -502,6 +560,22 @@ def main() -> int:
         "--no-calibration",
         action="store_true",
         help="Skip board-mm annotation; run uncalibrated",
+    )
+    live.add_argument(
+        "--imgsz", type=int, default=640,
+        help="YOLO inference size in px (default 640)",
+    )
+    live.add_argument(
+        "--enhance", action="store_true",
+        help="Apply CLAHE on the L channel before YOLO for low-light scenes",
+    )
+    live.add_argument(
+        "--no-quality", action="store_true",
+        help="Skip per-detection fuzzy quality grading",
+    )
+    live.add_argument(
+        "--person-min-confidence", type=int, default=40,
+        help="Drop person detections below this %% (default 40)",
     )
 
     snap = sub.add_parser("snapshot", help="Capture and save one frame")
@@ -562,6 +636,10 @@ def main() -> int:
             print_coordinates=args.print_coordinates,
             calibration_required=not args.no_calibration,
             calibration_path=args.calibration,
+            imgsz=args.imgsz,
+            enhance_low_light=args.enhance,
+            quality_enabled=not args.no_quality,
+            person_min_confidence=args.person_min_confidence,
         ) else 1
     if args.command == "snapshot":
         return 0 if capture_and_save_snapshot(

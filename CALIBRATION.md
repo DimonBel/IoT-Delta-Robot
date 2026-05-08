@@ -172,3 +172,7 @@ Anything else (different lighting, different fruit, different time of day) does 
 - Z-axis calibration (currently a configured constant).
 - Auto chessboard / ArUco detection (manual click + green-corner demo are enough today).
 - `RobotController` and live integration with `main/main.py`.
+
+## Related: live quality grading + detection-range flags
+
+Each produce detection in `live` also carries a fuzzy `quality` field (grade, defect_score, issues, memberships). New `live` defaults (`--confidence 25`, `--imgsz 640`, `--person-min-confidence 40`) and the `--enhance / --no-quality` flags are documented in [vision/README.md §4.2 / §4.3](vision/README.md).

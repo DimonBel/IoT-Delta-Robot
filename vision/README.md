@@ -168,3 +168,31 @@ Use `--print-coordinates` to display them while this temporary state is in place
 ### 4.1 Board-frame millimetres (`board_xy_mm`)
 
 When a saved calibration is loaded (default behaviour of `live`), each detection also gets `board_xy_mm: {x, y, inside_zone}` in millimetres relative to the centre of the calibrated work area. This is independent of `board_map` (which stays in `[0..1]`) and of `position_m` (3D camera frame). See [CALIBRATION.md](../CALIBRATION.md) for the full schema, the `--no-calibration` escape hatch, and how the resolution-mismatch error surfaces. Robot integration consumes this field — that part is intentionally not wired in this PR.
+
+### 4.2 Live quality grading (`quality`)
+
+`live` now also runs the colleague's fuzzy mean-HSV grading from `snapshot_inspection.py` on every produce detection (composed by `vision/quality.py`). Each produce detection gets:
+
+```
+"quality": {
+  "grade": "excellent" | "good" | "fair" | "poor" | "reject",
+  "defect_score": 0.0..1.0,
+  "issues": ["low_brightness_may_indicate_decay_or_shadow", ...],
+  "memberships": {grade -> 0..1},
+  "hsv": {"mean_h", "mean_s", "mean_v"} | null
+}
+```
+
+Heads up: it's bbox-mean HSV, so a small dark patch on a bright fruit only nudges the grade — don't expect `excellent → reject` for a tiny piece of black tape. Pixel-level dark-blob detection is a future upgrade.
+
+### 4.3 Detection-range and lighting flags
+
+New `live` flags tuned for "see small fruit at distance":
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--imgsz INT` | 640 | YOLO inference size. Bigger = better small-object recall, slower. |
+| `--confidence INT` | 25 | Min YOLO conf in %. Drops produce floor; people are gated separately. |
+| `--person-min-confidence INT` | 40 | Drops weak person detections after YOLO so the overlay isn't flooded. |
+| `--enhance` | off | Apply CLAHE on the L channel before YOLO. Helps in dim lighting; ~2-5 ms cost. |
+| `--no-quality` | off | Skip the `quality` annotation if not needed. |

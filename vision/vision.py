@@ -30,6 +30,9 @@ class ImageRecognition:
         backend_every_n_frames: int = 1,
         auto_start: bool = True,
         debug: bool = False,
+        imgsz: int = 640,
+        enhance_low_light: bool = False,
+        person_min_confidence: int = 40,
     ):
         self._config = {
             "confidence": confidence,
@@ -38,6 +41,9 @@ class ImageRecognition:
             "backend_url": backend_url,
             "backend_timeout": backend_timeout,
             "backend_every_n_frames": backend_every_n_frames,
+            "imgsz": imgsz,
+            "enhance_low_light": enhance_low_light,
+            "person_min_confidence": person_min_confidence,
         }
         self._debug = debug
         pipeline_map = {
@@ -211,6 +217,9 @@ class ZEDCoordinateVisionPipeline:
         backend_url: str = "",
         backend_timeout: float = 1.5,
         backend_every_n_frames: int = 1,
+        imgsz: int = 640,                  # accepted but unused at this layer
+        enhance_low_light: bool = False,   # idem
+        person_min_confidence: int = 40,   # idem
     ):
         self.confidence = confidence
         self.model = model
@@ -520,6 +529,9 @@ class ZEDYoloVisionPipeline(ZEDCoordinateVisionPipeline):
         backend_url: str = "",
         backend_timeout: float = 1.5,
         backend_every_n_frames: int = 1,
+        imgsz: int = 640,
+        enhance_low_light: bool = False,
+        person_min_confidence: int = 40,
     ):
         super().__init__(
             confidence=confidence,
@@ -536,10 +548,13 @@ class ZEDYoloVisionPipeline(ZEDCoordinateVisionPipeline):
         self._support_plane_mode = "hit"
         self._last_floor_plane = None
         self._last_floor_plane_ts = 0.0
-        # Real-time defaults: every frame inference at a small input size so the
-        # YOLO step stays under one ZED frame budget (~33 ms at 30 FPS).
+        # Real-time defaults: every frame inference. Default imgsz is 640 to
+        # improve recall on small/distant produce; bump higher (e.g. 832/1280)
+        # when the GPU has headroom, or pass a smaller value for headless CPU.
         self._yolo_inference_every_n_frames = 1
-        self._yolo_image_size = 416
+        self._yolo_image_size = max(96, int(imgsz))
+        self._enhance_low_light = bool(enhance_low_light)
+        self._person_min_confidence = max(0, min(100, int(person_min_confidence)))
         self._enable_depth_preview = False
         self._enable_support_plane = False
         self._last_detections = []
@@ -570,6 +585,25 @@ class ZEDYoloVisionPipeline(ZEDCoordinateVisionPipeline):
             "extreme": "yolov8x.pt"
         }
         return presets.get(self.model, self.model)
+
+    def _yolo_preprocess(self, image_bgr):
+        """Optional CLAHE on the L channel for low-light scenes. Off by default.
+
+        Cheap (~2-5 ms on a HD frame) and meaningfully improves YOLO recall when
+        the produce sits in shadow. Enable with `enhance_low_light=True` (which
+        the CLI exposes as `--enhance`).
+        """
+        if not self._enhance_low_light or self._cv2 is None or image_bgr is None:
+            return image_bgr
+        try:
+            lab = self._cv2.cvtColor(image_bgr, self._cv2.COLOR_BGR2LAB)
+            l, a, b = self._cv2.split(lab)
+            clahe = self._cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+            l = clahe.apply(l)
+            return self._cv2.cvtColor(self._cv2.merge((l, a, b)), self._cv2.COLOR_LAB2BGR)
+        except Exception:
+            # Never let preprocessing break the live loop.
+            return image_bgr
 
     def _try_import_yolo_dependencies(self, verbose: bool = False):
         sl, cv2, np = self._try_import_dependencies(verbose=verbose)
@@ -890,6 +924,7 @@ class ZEDYoloVisionPipeline(ZEDCoordinateVisionPipeline):
         if should_run_yolo:
             self._zed.retrieve_measure(self._point_cloud, sl.MEASURE.XYZRGBA, sl.MEM.CPU)
             yolo_input, crop_off_x, crop_off_y = self._crop_to_calibration_roi(rgb_frame)
+            yolo_input = self._yolo_preprocess(yolo_input)
             try:
                 yolo_results = self._yolo.predict(
                     source=yolo_input,
@@ -928,6 +963,11 @@ class ZEDYoloVisionPipeline(ZEDCoordinateVisionPipeline):
                         continue
 
                     conf = float(box.conf[0]) * 100.0 if box.conf is not None else 0.0
+                    # Per-class threshold: people are easy to spot at low conf
+                    # which floods the overlay; gate them at a higher cutoff
+                    # while letting weaker produce signals through.
+                    if detection_type == "human" and conf < self._person_min_confidence:
+                        continue
                     xyxy = box.xyxy[0].tolist() if box.xyxy is not None else [0, 0, 0, 0]
                     x1, y1, x2, y2 = [int(v) for v in xyxy]
                     # Remap from cropped ROI back to full-frame coordinates.

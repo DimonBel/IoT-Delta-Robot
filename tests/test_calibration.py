@@ -376,5 +376,59 @@ class AnnotateBoardMmTests(unittest.TestCase):
         self.assertNotIn("board_xy_mm", detections[0])
 
 
+def _has_cv2_for_quality() -> bool:
+    try:
+        import cv2  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+@unittest.skipUnless(_has_cv2_for_quality(), "opencv-python not installed")
+class AnnotateQualityTests(unittest.TestCase):
+    """Integration tests for vision.commands._annotate_quality."""
+
+    def _annotate(self):
+        from vision.commands import _annotate_quality
+        return _annotate_quality
+
+    def _orange(self, size: int = 200):
+        import numpy as np
+        img = np.zeros((size, size, 3), dtype=np.uint8)
+        img[:, :] = (50, 140, 240)
+        return img
+
+    def test_attaches_quality_only_to_produce(self):
+        annotate = self._annotate()
+        img = self._orange()
+        detections = [
+            {"detection_type": "produce", "label": "orange",
+             "confidence": 80.0, "bbox_xyxy": [10, 10, 190, 190]},
+            {"detection_type": "human", "label": "person",
+             "confidence": 95.0, "bbox_xyxy": [10, 10, 190, 190]},
+        ]
+        annotate(detections, img)
+        self.assertIn("quality", detections[0])
+        self.assertIn(detections[0]["quality"]["grade"],
+                      {"excellent", "good", "fair", "poor", "reject"})
+        self.assertNotIn("quality", detections[1])
+
+    def test_handles_missing_bbox(self):
+        annotate = self._annotate()
+        img = self._orange()
+        detections = [{"detection_type": "produce", "label": "orange",
+                       "confidence": 80.0}]
+        annotate(detections, img)
+        # grade_detection returns None for missing bbox, so no quality key set.
+        self.assertNotIn("quality", detections[0])
+
+    def test_no_frame_is_noop(self):
+        annotate = self._annotate()
+        detections = [{"detection_type": "produce", "label": "orange",
+                       "confidence": 80.0, "bbox_xyxy": [10, 10, 190, 190]}]
+        annotate(detections, None)
+        self.assertNotIn("quality", detections[0])
+
+
 if __name__ == "__main__":
     unittest.main()
