@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Sequence
 
-from vision.calibration import Calibrator, detection_center
+from vision.calibration import Calibrator, detection_center, refined_detection_center
 from vision.quality import grade_detection
 from vision.snapshot_inspection import SnapshotProduceInspector
 from vision.vision import ImageRecognition
@@ -44,17 +44,25 @@ def _annotate_board_mm(
     detections: Sequence[Dict[str, Any]],
     calibrator: Optional[Calibrator],
     image_size: tuple[int, int],
+    rgb_frame=None,
 ) -> None:
     """Add `board_xy_mm` to every detection in-place.
 
     Field shape: {"x": float|None, "y": float|None, "inside_zone": bool, "error"?: str}
     Coordinates are board-frame mm with origin at the centre of the calibrated
     work area (per the saved calibration).
+
+    When `rgb_frame` is provided, the per-detection (u, v) is refined via
+    `refined_detection_center` (sphere-aware silhouette fit). Otherwise it
+    falls back to the bbox arithmetic-mean centre.
     """
     if calibrator is None:
         return
     for d in detections:
-        center = detection_center(d)
+        if rgb_frame is not None:
+            center = refined_detection_center(d, rgb_frame)
+        else:
+            center = detection_center(d)
         if center is None:
             d["board_xy_mm"] = {"x": None, "y": None, "inside_zone": False}
             continue
@@ -219,7 +227,7 @@ def run_live_vision(
                 ref = rgb_frame if rgb_frame is not None else annotated_frame
                 if ref is not None:
                     h_img, w_img = ref.shape[:2]
-                    _annotate_board_mm(detections, calibrator, (w_img, h_img))
+                    _annotate_board_mm(detections, calibrator, (w_img, h_img), rgb_frame=ref)
 
             if quality_enabled and detections:
                 ref = rgb_frame if rgb_frame is not None else annotated_frame

@@ -27,7 +27,7 @@ from .core import (
     save_calibration,
 )
 from .draw import draw_result_image, fit_inverse_polynomial
-from .runtime import Calibrator, detection_center
+from .runtime import Calibrator, detection_center, refined_detection_center
 
 __all__ = [
     "DEFAULT_PICK_HEIGHT_MM",
@@ -47,5 +47,6 @@ __all__ = [
     "generate_grid_targets",
     "load_calibration",
     "pixel_to_robot_xy",
+    "refined_detection_center",
     "save_calibration",
 ]

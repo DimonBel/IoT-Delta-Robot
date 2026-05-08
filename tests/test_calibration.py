@@ -430,5 +430,54 @@ class AnnotateQualityTests(unittest.TestCase):
         self.assertNotIn("quality", detections[0])
 
 
+@unittest.skipUnless(_has_cv2_for_quality(), "opencv-python not installed")
+class RefinedDetectionCenterTests(unittest.TestCase):
+    """Sphere-aware bbox-centre refinement for top-down near-spherical produce."""
+
+    def _import(self):
+        from vision.calibration.runtime import refined_detection_center
+        return refined_detection_center
+
+    def _orange_disc(self, size: int = 200, cx: int = 100, cy: int = 100, r: int = 40):
+        import cv2
+        import numpy as np
+        img = np.full((size, size, 3), 180, dtype=np.uint8)
+        cv2.circle(img, (cx, cy), r, (0, 140, 240), thickness=-1)
+        return img
+
+    def test_circle_fit_recovers_disc_centre(self):
+        refined = self._import()
+        img = self._orange_disc()
+        # Loose bbox: arithmetic-mean centre is (115, 115); disc centre is (100, 100).
+        d = {"bbox_xyxy": [50, 50, 180, 180]}
+        u, v = refined(d, img)
+        self.assertAlmostEqual(u, 100.0, delta=3.0)
+        self.assertAlmostEqual(v, 100.0, delta=3.0)
+        self.assertEqual(d["center_method"], "circle_fit")
+        self.assertEqual(d["center_uv"], [u, v])
+
+    def test_uniform_crop_falls_back_to_bbox_centre(self):
+        import numpy as np
+        refined = self._import()
+        img = np.full((200, 200, 3), 180, dtype=np.uint8)
+        d = {"bbox_xyxy": [50, 50, 180, 180]}
+        u, v = refined(d, img)
+        self.assertEqual((u, v), (115.0, 115.0))
+        self.assertEqual(d["center_method"], "bbox_center")
+
+    def test_no_frame_falls_back_to_bbox_centre(self):
+        refined = self._import()
+        d = {"bbox_xyxy": [50, 50, 180, 180]}
+        u, v = refined(d, None)
+        self.assertEqual((u, v), (115.0, 115.0))
+        self.assertEqual(d["center_method"], "bbox_center")
+
+    def test_missing_bbox_returns_none(self):
+        refined = self._import()
+        d = {"label": "orange"}
+        self.assertIsNone(refined(d, None))
+        self.assertNotIn("center_method", d)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -169,6 +169,11 @@ Use `--print-coordinates` to display them while this temporary state is in place
 
 When a saved calibration is loaded (default behaviour of `live`), each detection also gets `board_xy_mm: {x, y, inside_zone}` in millimetres relative to the centre of the calibrated work area. This is independent of `board_map` (which stays in `[0..1]`) and of `position_m` (3D camera frame). See [CALIBRATION.md](../CALIBRATION.md) for the full schema, the `--no-calibration` escape hatch, and how the resolution-mismatch error surfaces. Robot integration consumes this field — that part is intentionally not wired in this PR.
 
+The pixel that gets transformed into `board_xy_mm` is also exposed for debugging:
+
+- `center_uv: [u, v]` — the image pixel used as the pickup point.
+- `center_method: "circle_fit" | "bbox_center"` — how that pixel was chosen. With a top-down camera and near-spherical produce, the live loop runs an HSV-saturation + min-enclosing-circle fit on the bbox crop and uses its centre (`circle_fit`); on uniform crops, missing frames, or any cv2 failure it falls back to the bbox arithmetic mean (`bbox_center`). The `circle_fit` path keeps `board_xy_mm` close to the actual fruit centre rather than drifting toward the bbox edge.
+
 ### 4.2 Live quality grading (`quality`)
 
 `live` now also runs the colleague's fuzzy mean-HSV grading from `snapshot_inspection.py` on every produce detection (composed by `vision/quality.py`). Each produce detection gets:
