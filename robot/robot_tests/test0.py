@@ -4,7 +4,7 @@ import time
 # работает как надо, идёт спокойно по треугольнику
 def main() -> None:
     with serial.Serial(port="COM6", baudrate=115200, timeout=2) as ser:
-        ser.write(b"G28\n")
+        # ser.write(b"G28\n")
         time.sleep(1)
         
         for _ in range(5):
