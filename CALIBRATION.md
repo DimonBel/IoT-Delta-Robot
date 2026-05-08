@@ -119,6 +119,40 @@ python -m vision.calibration.verify --summary      # show metadata of saved cal
 python -m vision.calibration.verify --pixel 320 240
 ```
 
+## Live integration (camera side)
+
+`python -m vision.commands live` now loads the saved calibration and annotates every detection with **board-frame mm**:
+
+```json
+"board_xy_mm": {"x": 12.3, "y": -45.0, "inside_zone": true}
+```
+
+Origin is the centre of the calibrated work area (per the saved JSON), X grows right, Y grows up. The colleague's `board_map` UV in `[0..1]` and the 3D `position_m` are kept untouched alongside.
+
+By default a missing calibration file is a hard error:
+
+```
+python -m vision.commands live --duration 10
+> ERROR: calibration file not found at calibration/calibration.json
+> Run `python -m vision.calibration.ui --image PATH ...` first,
+> or pass --no-calibration to run live without board-mm coords.
+```
+
+Useful flags on `live`:
+
+| Flag | Effect |
+|---|---|
+| `--calibration PATH` | Load a calibration JSON from a non-default path. |
+| `--no-calibration` | Skip the load; live runs without `board_xy_mm`. |
+| `--print-coordinates` | Also prints 3D camera coords AND board mm per best detection. |
+
+Edge cases handled in-place:
+
+- **No bbox on a detection** → `board_xy_mm: {"x": null, "y": null, "inside_zone": false}`.
+- **Image size mismatch** (live frame vs calibrated resolution) → `board_xy_mm: {"x": null, "y": null, "inside_zone": false, "error": "image_size_mismatch"}`. Recalibrate at the new resolution.
+
+Robot integration (calling `robot.move_to(x_mm, y_mm, z_mm)`) is intentionally **not** wired here. Whoever owns the robot side picks `board_xy_mm` straight off the detection and decides on Z, gripping, and frame conversion.
+
 ## When to recalibrate
 
 - **Camera physically moves** (the cage was nudged, the mount tightened, etc.).

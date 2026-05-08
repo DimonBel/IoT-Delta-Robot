@@ -7,10 +7,48 @@ import os
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional, Sequence
 
+from vision.calibration import Calibrator, detection_center
 from vision.snapshot_inspection import SnapshotProduceInspector
 from vision.vision import ImageRecognition
+
+
+DEFAULT_CALIBRATION_PATH = "calibration/calibration.json"
+
+
+def _annotate_board_mm(
+    detections: Sequence[Dict[str, Any]],
+    calibrator: Optional[Calibrator],
+    image_size: tuple[int, int],
+) -> None:
+    """Add `board_xy_mm` to every detection in-place.
+
+    Field shape: {"x": float|None, "y": float|None, "inside_zone": bool, "error"?: str}
+    Coordinates are board-frame mm with origin at the centre of the calibrated
+    work area (per the saved calibration).
+    """
+    if calibrator is None:
+        return
+    for d in detections:
+        center = detection_center(d)
+        if center is None:
+            d["board_xy_mm"] = {"x": None, "y": None, "inside_zone": False}
+            continue
+        u, v = center
+        try:
+            x_mm, y_mm = calibrator.transform_pixel(u, v, image_size=image_size)
+        except ValueError:
+            d["board_xy_mm"] = {
+                "x": None, "y": None, "inside_zone": False,
+                "error": "image_size_mismatch",
+            }
+            continue
+        d["board_xy_mm"] = {
+            "x": round(float(x_mm), 2),
+            "y": round(float(y_mm), 2),
+            "inside_zone": bool(calibrator.is_inside_zone(x_mm, y_mm)),
+        }
 
 
 def _fmt_meters(value: Any) -> str:
@@ -30,13 +68,37 @@ def run_live_vision(
     skip_display: bool = False,
     debug: bool = False,
     print_coordinates: bool = False,
+    calibration_required: bool = True,
+    calibration_path: str = DEFAULT_CALIBRATION_PATH,
 ) -> bool:
-    """Run live vision loop and optional display."""
+    """Run live vision loop and optional display.
+
+    When `calibration_required` is True (default), a saved calibration JSON is
+    loaded once at startup and each detection is annotated with `board_xy_mm`
+    in board-frame millimetres. Pass `calibration_required=False` to run with
+    only the existing camera/UV outputs.
+    """
     try:
         import cv2
     except ImportError:
         print("ERROR: OpenCV not installed. Install with: pip install opencv-python")
         return False
+
+    calibrator: Optional[Calibrator] = None
+    if calibration_required:
+        try:
+            calibrator = Calibrator.load(calibration_path)
+        except FileNotFoundError:
+            print(f"ERROR: calibration file not found at {calibration_path}")
+            print("Run `python -m vision.calibration.ui --image PATH ...` first,")
+            print("or pass --no-calibration to run live without board-mm coords.")
+            return False
+        cal = calibrator.calibration
+        print(
+            f"Loaded calibration: poly{cal.fit.degree}, "
+            f"image {cal.image_size[0]}x{cal.image_size[1]}, "
+            f"RMS {cal.fit.rms_residual_mm:.2f} mm"
+        )
 
     print("Initializing vision system...")
     vision = ImageRecognition(
@@ -85,6 +147,12 @@ def run_live_vision(
             payload = frame_data.get("payload", {})
             detections = payload.get("detections", [])
 
+            if calibrator is not None and detections:
+                ref = rgb_frame if rgb_frame is not None else annotated_frame
+                if ref is not None:
+                    h_img, w_img = ref.shape[:2]
+                    _annotate_board_mm(detections, calibrator, (w_img, h_img))
+
             if detections:
                 stats["frames_with_detections"] += 1
                 stats["total_detections"] += len(detections)
@@ -110,6 +178,15 @@ def run_live_vision(
                         f"Y:{_fmt_meters(pos.get('y'))} "
                         f"Z:{_fmt_meters(pos.get('z'))}"
                     )
+                    bxy = best.get("board_xy_mm") or {}
+                    if bxy.get("x") is not None and bxy.get("y") is not None:
+                        zone = "inside" if bxy.get("inside_zone") else "outside"
+                        print(
+                            f"  board (mm) X:{bxy['x']:+.1f} "
+                            f"Y:{bxy['y']:+.1f} ({zone})"
+                        )
+                    elif "error" in bxy:
+                        print(f"  board (mm): {bxy['error']}")
 
             if not skip_display and (annotated_frame is not None or rgb_frame is not None):
                 display_frame = annotated_frame if annotated_frame is not None else rgb_frame
@@ -236,6 +313,16 @@ def main() -> int:
     live.add_argument("--no-display", action="store_true")
     live.add_argument("--debug", action="store_true")
     live.add_argument("--print-coordinates", action="store_true")
+    live.add_argument(
+        "--calibration",
+        default=DEFAULT_CALIBRATION_PATH,
+        help=f"Path to saved calibration JSON (default {DEFAULT_CALIBRATION_PATH})",
+    )
+    live.add_argument(
+        "--no-calibration",
+        action="store_true",
+        help="Skip board-mm annotation; run uncalibrated",
+    )
 
     snap = sub.add_parser("snapshot", help="Capture and save one frame")
     snap.add_argument("--output", required=True)
@@ -261,6 +348,8 @@ def main() -> int:
             skip_display=args.no_display,
             debug=args.debug,
             print_coordinates=args.print_coordinates,
+            calibration_required=not args.no_calibration,
+            calibration_path=args.calibration,
         ) else 1
     if args.command == "snapshot":
         return 0 if capture_and_save_snapshot(

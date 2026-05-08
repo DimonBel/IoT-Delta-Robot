@@ -325,5 +325,56 @@ class CalibratorTests(unittest.TestCase):
         self.assertIsNone(wrap.transform_detection({}))
 
 
+class AnnotateBoardMmTests(unittest.TestCase):
+    """Integration tests for vision.commands._annotate_board_mm.
+
+    Imported lazily because vision.commands pulls in vision.vision -> pyzed
+    paths; the import works without ZED but is heavier than the rest of the
+    test module.
+    """
+
+    def _annotate(self):
+        from vision.commands import _annotate_board_mm
+        return _annotate_board_mm
+
+    def test_annotates_inside_and_outside_zone(self):
+        annotate = self._annotate()
+        wrap = Calibrator(_make_calibration())
+        detections = [
+            {"label": "apple", "bbox_xyxy": [360, 280, 380, 300]},  # centre (370, 290) -> (50, 50)
+            {"label": "apple", "bbox_xyxy": [10, 10, 30, 30]},      # centre (20, 20) -> way outside
+            {"label": "apple"},                                      # no bbox
+        ]
+        annotate(detections, wrap, image_size=(640, 480))
+
+        self.assertAlmostEqual(detections[0]["board_xy_mm"]["x"], 50.0, places=2)
+        self.assertAlmostEqual(detections[0]["board_xy_mm"]["y"], 50.0, places=2)
+        self.assertTrue(detections[0]["board_xy_mm"]["inside_zone"])
+
+        self.assertFalse(detections[1]["board_xy_mm"]["inside_zone"])
+        self.assertIsNotNone(detections[1]["board_xy_mm"]["x"])  # mm still emitted
+        self.assertNotIn("error", detections[1]["board_xy_mm"])
+
+        self.assertIsNone(detections[2]["board_xy_mm"]["x"])
+        self.assertIsNone(detections[2]["board_xy_mm"]["y"])
+        self.assertFalse(detections[2]["board_xy_mm"]["inside_zone"])
+
+    def test_image_size_mismatch_marks_error(self):
+        annotate = self._annotate()
+        wrap = Calibrator(_make_calibration())
+        detections = [{"label": "apple", "bbox_xyxy": [360, 280, 380, 300]}]
+        annotate(detections, wrap, image_size=(1280, 720))
+        self.assertEqual(detections[0]["board_xy_mm"]["error"], "image_size_mismatch")
+        self.assertIsNone(detections[0]["board_xy_mm"]["x"])
+        self.assertIsNone(detections[0]["board_xy_mm"]["y"])
+        self.assertFalse(detections[0]["board_xy_mm"]["inside_zone"])
+
+    def test_no_calibrator_is_noop(self):
+        annotate = self._annotate()
+        detections = [{"label": "apple", "bbox_xyxy": [360, 280, 380, 300]}]
+        annotate(detections, None, image_size=(640, 480))
+        self.assertNotIn("board_xy_mm", detections[0])
+
+
 if __name__ == "__main__":
     unittest.main()

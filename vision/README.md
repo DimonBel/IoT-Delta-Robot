@@ -142,3 +142,7 @@ There are two coordinate outputs in the pipeline:
 
 Coordinate logic is still active in payload generation and mapping, but terminal coordinate printing is temporarily muted by default in `live` mode.  
 Use `--print-coordinates` to display them while this temporary state is in place.
+
+### 4.1 Board-frame millimetres (`board_xy_mm`)
+
+When a saved calibration is loaded (default behaviour of `live`), each detection also gets `board_xy_mm: {x, y, inside_zone}` in millimetres relative to the centre of the calibrated work area. This is independent of `board_map` (which stays in `[0..1]`) and of `position_m` (3D camera frame). See [CALIBRATION.md](../CALIBRATION.md) for the full schema, the `--no-calibration` escape hatch, and how the resolution-mismatch error surfaces. Robot integration consumes this field — that part is intentionally not wired in this PR.
