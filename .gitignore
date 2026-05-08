@@ -17,3 +17,10 @@ tests/photo_*.jpg
 tests/photo_*.jpeg
 tests/photo_*.png
 samples/
+*.pt
+
+# Vision generated artifacts
+outputs/
+vision_outputs/
+*.svo
+*.svo2

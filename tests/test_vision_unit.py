@@ -92,17 +92,20 @@ class TestHelperFunctions(unittest.TestCase):
         self.assertEqual(kind, "produce")
         self.assertEqual(label, "apple")
 
-    def test_classify_yolo_label_people_and_electronics(self):
+    def test_classify_yolo_label_people_objects_and_board(self):
         person_kind, person_label = classify_yolo_label("person")
         phone_kind, phone_label = classify_yolo_label("cell phone")
-        skip_kind, skip_label = classify_yolo_label("chair")
+        chair_kind, chair_label = classify_yolo_label("chair")
+        board_kind, board_label = classify_yolo_label("dining table")
 
-        self.assertEqual(person_kind, "presence")
-        self.assertEqual(person_label, "person_presence")
-        self.assertEqual(phone_kind, "presence")
-        self.assertEqual(phone_label, "electronics_presence")
-        self.assertEqual(skip_kind, "skip")
-        self.assertIsNone(skip_label)
+        self.assertEqual(person_kind, "human")
+        self.assertEqual(person_label, "person")
+        self.assertEqual(phone_kind, "object")
+        self.assertEqual(phone_label, "cell phone")
+        self.assertEqual(chair_kind, "object")
+        self.assertEqual(chair_label, "chair")
+        self.assertEqual(board_kind, "base_board")
+        self.assertEqual(board_label, "dining table")
 
 
 class TestImageRecognition(unittest.TestCase):
