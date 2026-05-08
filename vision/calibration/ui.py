@@ -186,6 +186,70 @@ def collect_clicks_for_targets(img, targets):
     return collected
 
 
+def _corner_target_indices(rows: int, cols: int) -> list[int]:
+    """Return unique grid indices for the 4 corners in row-major targets."""
+    idx = [
+        0,  # top-left
+        cols - 1,  # top-right
+        (rows - 1) * cols,  # bottom-left
+        rows * cols - 1,  # bottom-right
+    ]
+    # De-duplicate for degenerate grids (e.g. 1xN).
+    out: list[int] = []
+    for i in idx:
+        if i not in out:
+            out.append(i)
+    return out
+
+
+def _expand_from_corner_clicks(
+    rows: int,
+    cols: int,
+    all_targets: list[tuple[float, float]],
+    corner_clicks: list[CalibrationPoint],
+) -> list[CalibrationPoint]:
+    """Build full-grid calibration points from 4 corner clicks.
+
+    Pixel coordinates are bilinearly interpolated across the grid from the 4
+    clicked corners while robot-space coordinates come from `all_targets`.
+    """
+    if len(corner_clicks) < 4:
+        raise ValueError("Need 4 corner clicks to expand a full grid.")
+
+    # Corner click order is fixed by _corner_target_indices:
+    #   0 top-left, 1 top-right, 2 bottom-left, 3 bottom-right
+    tl, tr, bl, br = corner_clicks[0], corner_clicks[1], corner_clicks[2], corner_clicks[3]
+
+    points: list[CalibrationPoint] = []
+    for r in range(rows):
+        t = 0.0 if rows == 1 else r / float(rows - 1)
+        for c in range(cols):
+            s = 0.0 if cols == 1 else c / float(cols - 1)
+            # Bilinear interpolation in image pixel space.
+            u = (
+                (1.0 - s) * (1.0 - t) * tl.u
+                + s * (1.0 - t) * tr.u
+                + (1.0 - s) * t * bl.u
+                + s * t * br.u
+            )
+            v = (
+                (1.0 - s) * (1.0 - t) * tl.v
+                + s * (1.0 - t) * tr.v
+                + (1.0 - s) * t * bl.v
+                + s * t * br.v
+            )
+            x_mm, y_mm = all_targets[r * cols + c]
+            points.append(
+                CalibrationPoint(
+                    u=float(u),
+                    v=float(v),
+                    x_mm=float(x_mm),
+                    y_mm=float(y_mm),
+                )
+            )
+    return points
+
+
 def run_calibration(
     image,
     targets,
@@ -194,8 +258,11 @@ def run_calibration(
     notes: str,
     degree: int | None = None,
     result_image_path: str | None = None,
+    precollected_points: list[CalibrationPoint] | None = None,
 ) -> Calibration:
-    points = collect_clicks_for_targets(image, targets)
+    points = precollected_points
+    if points is None:
+        points = collect_clicks_for_targets(image, targets)
     if not points:
         raise RuntimeError("No calibration points collected.")
 
@@ -275,6 +342,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "Pass empty string to disable."
         ),
     )
+    p.add_argument(
+        "--corner-4pt",
+        action="store_true",
+        help=(
+            "Click only the 4 corner markers, then interpolate all inner grid "
+            "points algorithmically before fitting."
+        ),
+    )
     return p
 
 
@@ -298,8 +373,25 @@ def main(argv: list[str] | None = None) -> int:
     else:
         image = _grab_live_frame()
 
+    use_4pt = bool(args.corner_4pt)
+    if use_4pt and (rows < 2 or cols < 2):
+        print("ERROR: --corner-4pt requires a grid of at least 2x2.", file=sys.stderr)
+        return 2
+
     print(f"Calibrating against {rows}x{cols} grid ({len(targets)} markers).")
-    print("Click each marker in row-major order (top-left first).")
+    if use_4pt:
+        print("4-point mode: click corners in this order:")
+        print("  1) top-left  2) top-right  3) bottom-left  4) bottom-right")
+        corner_idx = _corner_target_indices(rows, cols)
+        click_targets = [targets[i] for i in corner_idx]
+        clicked = collect_clicks_for_targets(image, click_targets)
+        if len(clicked) != 4:
+            print("ERROR: expected 4 corner clicks.", file=sys.stderr)
+            return 1
+        calibration_targets = _expand_from_corner_clicks(rows, cols, targets, clicked)
+    else:
+        print("Click each marker in row-major order (top-left first).")
+        calibration_targets = targets
 
     if args.result_image is None:
         out_dir = os.path.dirname(os.path.abspath(args.out)) or "."
@@ -318,6 +410,7 @@ def main(argv: list[str] | None = None) -> int:
             notes=args.notes,
             degree=args.degree,
             result_image_path=result_image_path,
+            precollected_points=(calibration_targets if use_4pt else None),
         )
     except KeyboardInterrupt:
         print("Calibration aborted.", file=sys.stderr)
