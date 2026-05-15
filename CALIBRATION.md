@@ -50,6 +50,16 @@ Click each marker in row-major order (top-left first). `y` confirms, `n` redoes,
 
 `--live` swaps the input source to a single ZED frame (requires the ZED SDK).
 
+If you want the staged manual workflow instead, use `--manual-wizard`. That
+mode walks you through:
+
+1. 4 master-grid clicks.
+2. 4 slave-grid clicks.
+3. 1 final robot-reference point.
+4. Typing the robot X,Y coordinates after each confirmed click.
+
+In the camera view, the clicked point is shown as a red cross while the saved
+points are marked in green after confirmation.
 ### 3. One-shot demo on the stereo photo
 
 ```

@@ -16,6 +16,7 @@ from vision.calibration import (
     Calibrator,
     PolyFit,
     SCHEMA_VERSION,
+    ToolCenterOffset,
     WorkZone,
     auto_select_degree,
     derive_work_zone,
@@ -166,6 +167,29 @@ class GridTargetsTests(unittest.TestCase):
             generate_grid_targets(rows=0, cols=3, spacing_mm=10.0)
 
 
+class ManualWizardHelpersTests(unittest.TestCase):
+    def test_manual_stage_plan_defaults(self):
+        from vision.calibration.ui import _manual_stage_plan
+
+        stages = _manual_stage_plan()
+        self.assertEqual([stage.label for stage in stages], ["master grid", "slave grid", "robot point"])
+        self.assertEqual([stage.count for stage in stages], [4, 4, 1])
+
+    def test_manual_stage_plan_rejects_invalid_counts(self):
+        from vision.calibration.ui import _manual_stage_plan
+
+        with self.assertRaises(ValueError):
+            _manual_stage_plan(master_points=0)
+
+    def test_parse_robot_xy(self):
+        from vision.calibration.ui import _parse_robot_xy
+
+        self.assertEqual(_parse_robot_xy("10,20"), (10.0, 20.0))
+        self.assertEqual(_parse_robot_xy("-5  12.5"), (-5.0, 12.5))
+        with self.assertRaises(ValueError):
+            _parse_robot_xy("not numbers")
+
+
 class IORoundTripTests(unittest.TestCase):
     def _build_calibration(self) -> Calibration:
         pts = [
@@ -180,6 +204,7 @@ class IORoundTripTests(unittest.TestCase):
             fit=fit,
             points=pts,
             work_zone=zone,
+            active_zone=zone,
             pick_height_z_mm=-940.0,
             notes="unit test",
         )
@@ -197,6 +222,8 @@ class IORoundTripTests(unittest.TestCase):
         np.testing.assert_allclose(loaded.fit.coeffs_y, cal.fit.coeffs_y, atol=1e-9)
         self.assertAlmostEqual(loaded.fit.rms_residual_mm, cal.fit.rms_residual_mm)
         self.assertEqual(loaded.work_zone.to_dict(), cal.work_zone.to_dict())
+        self.assertEqual(loaded.active_zone.to_dict(), cal.active_zone.to_dict())
+        self.assertEqual(loaded.tool_center_offset.to_dict(), cal.tool_center_offset.to_dict())
         self.assertEqual(loaded.pick_height_z_mm, cal.pick_height_z_mm)
         self.assertEqual(len(loaded.points), len(cal.points))
 
@@ -218,6 +245,19 @@ class IORoundTripTests(unittest.TestCase):
         x, y = pixel_to_robot_xy(cal, 320, 240, image_size=(640, 480))
         self.assertTrue(math.isfinite(x))
         self.assertTrue(math.isfinite(y))
+
+    def test_old_schema_without_new_fields_still_loads(self):
+        cal = self._build_calibration()
+        data = cal.to_dict()
+        data.pop("active_zone")
+        data.pop("tool_center_offset")
+        data["schema_version"] = 1
+
+        loaded = Calibration.from_dict(data)
+
+        self.assertEqual(loaded.work_zone.to_dict(), cal.work_zone.to_dict())
+        self.assertEqual(loaded.active_zone.to_dict(), cal.work_zone.to_dict())
+        self.assertEqual(loaded.tool_center_offset.to_dict(), ToolCenterOffset().to_dict())
 
 
 class AutoDegreeTests(unittest.TestCase):
@@ -262,8 +302,30 @@ def _make_calibration() -> Calibration:
         fit=fit,
         points=pts,
         work_zone=zone,
+        active_zone=zone,
         pick_height_z_mm=-940.0,
         notes="unit test calibration",
+    )
+
+
+def _make_calibration_with_offset_and_active_zone() -> Calibration:
+    pts = [
+        CalibrationPoint(u=u, v=v, x_mm=float(u - 320), y_mm=float(v - 240))
+        for u in (220, 320, 420)
+        for v in (140, 240, 340)
+    ]
+    fit = fit_polynomial(pts, degree=2)
+    work_zone = WorkZone(x_min=-120, x_max=120, y_min=-120, y_max=120)
+    active_zone = WorkZone(x_min=-60, x_max=60, y_min=-60, y_max=60)
+    return Calibration(
+        image_size=(640, 480),
+        fit=fit,
+        points=pts,
+        work_zone=work_zone,
+        active_zone=active_zone,
+        tool_center_offset=ToolCenterOffset(x_mm=-5.0, y_mm=2.0),
+        pick_height_z_mm=-940.0,
+        notes="unit test calibration with offset",
     )
 
 
@@ -300,6 +362,19 @@ class CalibratorTests(unittest.TestCase):
         self.assertAlmostEqual(x, 50.0, places=5)
         self.assertAlmostEqual(y, 50.0, places=5)
 
+    def test_transform_pixel_applies_tool_center_offset(self):
+        wrap = Calibrator(_make_calibration_with_offset_and_active_zone())
+        x, y = wrap.transform_pixel(370, 290)
+        self.assertAlmostEqual(x, 55.0, places=5)
+        self.assertAlmostEqual(y, 48.0, places=5)
+
+    def test_active_zone_filtering_does_not_change_coordinates(self):
+        wrap = Calibrator(_make_calibration_with_offset_and_active_zone())
+        x, y = wrap.transform_pixel(370, 290)
+        self.assertAlmostEqual(x, 55.0, places=5)
+        self.assertAlmostEqual(y, 48.0, places=5)
+        self.assertTrue(wrap.is_inside_zone(x, y))
+
     def test_transform_pixel_image_size_mismatch_raises(self):
         wrap = Calibrator(_make_calibration())
         with self.assertRaises(ValueError):
@@ -316,7 +391,7 @@ class CalibratorTests(unittest.TestCase):
         self.assertEqual(z, -940.0)
 
     def test_transform_detection_outside_zone_returns_none(self):
-        wrap = Calibrator(_make_calibration())
+        wrap = Calibrator(_make_calibration_with_offset_and_active_zone())
         det = {"bbox_xyxy": [10, 10, 30, 30]}  # centre (20, 20) -> (-300, -220) outside
         self.assertIsNone(wrap.transform_detection(det))
 
@@ -339,7 +414,7 @@ class AnnotateBoardMmTests(unittest.TestCase):
 
     def test_annotates_inside_and_outside_zone(self):
         annotate = self._annotate()
-        wrap = Calibrator(_make_calibration())
+        wrap = Calibrator(_make_calibration_with_offset_and_active_zone())
         detections = [
             {"label": "apple", "bbox_xyxy": [360, 280, 380, 300]},  # centre (370, 290) -> (50, 50)
             {"label": "apple", "bbox_xyxy": [10, 10, 30, 30]},      # centre (20, 20) -> way outside
@@ -347,8 +422,8 @@ class AnnotateBoardMmTests(unittest.TestCase):
         ]
         annotate(detections, wrap, image_size=(640, 480))
 
-        self.assertAlmostEqual(detections[0]["board_xy_mm"]["x"], 50.0, places=2)
-        self.assertAlmostEqual(detections[0]["board_xy_mm"]["y"], 50.0, places=2)
+        self.assertAlmostEqual(detections[0]["board_xy_mm"]["x"], 55.0, places=2)
+        self.assertAlmostEqual(detections[0]["board_xy_mm"]["y"], 48.0, places=2)
         self.assertTrue(detections[0]["board_xy_mm"]["inside_zone"])
 
         self.assertFalse(detections[1]["board_xy_mm"]["inside_zone"])

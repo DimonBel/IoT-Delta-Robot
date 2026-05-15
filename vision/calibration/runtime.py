@@ -175,7 +175,8 @@ class Calibrator:
         Pass `image_size=(W, H)` to assert the runtime resolution matches the
         calibrated one. Mismatch raises ValueError.
         """
-        return pixel_to_robot_xy(self._cal, u, v, image_size=image_size)
+        x_mm, y_mm = pixel_to_robot_xy(self._cal, u, v, image_size=image_size)
+        return self._cal.apply_tool_center_offset(x_mm, y_mm)
 
     def is_inside_zone(self, x_mm: float, y_mm: float) -> bool:
         return self._cal.is_inside_zone(x_mm, y_mm)

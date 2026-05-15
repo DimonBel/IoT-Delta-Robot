@@ -21,14 +21,15 @@ from .runtime import Calibrator
 
 def _print_summary(cal: Calibrator) -> None:
     c = cal.calibration
-    z = c.work_zone
+    z = c.effective_active_zone()
     print(f"calibration: {c.notes or '(no notes)'}")
     print(f"  created_at      : {c.created_at}")
     print(f"  image_size      : {c.image_size[0]} x {c.image_size[1]}")
     print(f"  fit             : poly{c.fit.degree}  RMS {c.fit.rms_residual_mm:.2f} mm")
     print(f"  N points        : {len(c.points)}")
-    print(f"  work zone (mm)  : X[{z.x_min:.0f}, {z.x_max:.0f}]  "
+    print(f"  active zone (mm): X[{z.x_min:.0f}, {z.x_max:.0f}]  "
           f"Y[{z.y_min:.0f}, {z.y_max:.0f}]")
+    print(f"  tool offset     : X{c.tool_center_offset.x_mm:+.0f}  Y{c.tool_center_offset.y_mm:+.0f} mm")
     print(f"  pick height Z   : {c.pick_height_z_mm:.0f} mm")
 
 

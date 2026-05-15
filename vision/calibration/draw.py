@@ -77,9 +77,9 @@ def draw_result_image(
     )
     cv2.polylines(overlay, board_pts, isClosed=True, color=(0, 200, 0), thickness=2)
 
-    # Safe work zone (cyan), drawn via inverse fit if available.
+    # Active zone (cyan), drawn via inverse fit if available.
     if inverse_fit is not None:
-        zone_pts_mm = _zone_perimeter_robot(calibration.work_zone, samples_per_edge)
+        zone_pts_mm = _zone_perimeter_robot(calibration.effective_active_zone(), samples_per_edge)
         zone_pts_px = []
         for (x_mm, y_mm) in zone_pts_mm:
             u, v = inverse_fit.apply(x_mm, y_mm)
@@ -111,15 +111,15 @@ def draw_result_image(
         f"RMS residual = {calibration.fit.rms_residual_mm:.2f} mm   "
         f"N points = {len(calibration.points)}"
     )
-    z = calibration.work_zone
+    z = calibration.effective_active_zone()
     line2 = (
-        f"Work zone (mm): X[{z.x_min:.0f}, {z.x_max:.0f}]  "
+        f"Active zone (mm): X[{z.x_min:.0f}, {z.x_max:.0f}]  "
         f"Y[{z.y_min:.0f}, {z.y_max:.0f}]   "
         f"Pick Z = {calibration.pick_height_z_mm:.0f} mm"
     )
     line3 = (
         "Green = calibrated marker outline   "
-        "Cyan = safe work zone   "
+        "Cyan = active zone   "
         "Red dots = clicked markers"
     )
     cv2.putText(overlay, line1, (10, h_img - strip_h + 22),
