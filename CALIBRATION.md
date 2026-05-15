@@ -173,6 +173,6 @@ Anything else (different lighting, different fruit, different time of day) does 
 - Auto chessboard / ArUco detection (manual click + green-corner demo are enough today).
 - `RobotController` and live integration with `main/main.py`.
 
-## Related: live quality grading + detection-range flags
+## Related: live quality grading, ID tracking, detection-range flags
 
-Each produce detection in `live` also carries a fuzzy `quality` field (grade, defect_score, issues, memberships). New `live` defaults (`--confidence 25`, `--imgsz 640`, `--person-min-confidence 40`) and the `--enhance / --no-quality` flags are documented in [vision/README.md §4.2 / §4.3](vision/README.md).
+Each produce detection in `live` also carries a fuzzy `quality` field (grade, defect_score, issues, memberships) **and** a stable `track_id` from a centroid tracker in board mm. Two output files land in `outputs/` (gitignored): `latest_tracks.json` (overwritten every few frames) and `track_events.jsonl` (append-only audit). New `live` defaults (`--confidence 25`, `--imgsz 832`, `--person-min-confidence 40`) and the `--enhance / --no-quality / --no-tracking / --tracker-*` flags are documented in [vision/README.md §4.2 / §4.3 / §4.4](vision/README.md).

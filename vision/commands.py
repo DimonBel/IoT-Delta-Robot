@@ -14,10 +14,13 @@ from typing import Any, Dict, Iterable, Optional, Sequence
 from vision.calibration import Calibrator, detection_center, refined_detection_center
 from vision.quality import grade_detection
 from vision.snapshot_inspection import SnapshotProduceInspector
+from vision.tracker import FruitTracker
 from vision.vision import ImageRecognition
 
 
 DEFAULT_CALIBRATION_PATH = "calibration/calibration.json"
+DEFAULT_TRACKER_SNAPSHOT = "outputs/latest_tracks.json"
+DEFAULT_TRACKER_EVENTS = "outputs/track_events.jsonl"
 
 
 def _expand_image_inputs(image_paths: Iterable[str]) -> list[str]:
@@ -127,10 +130,16 @@ def run_live_vision(
     print_coordinates: bool = False,
     calibration_required: bool = True,
     calibration_path: str = DEFAULT_CALIBRATION_PATH,
-    imgsz: int = 640,
+    imgsz: int = 832,
     enhance_low_light: bool = False,
     quality_enabled: bool = True,
     person_min_confidence: int = 40,
+    tracking_enabled: bool = True,
+    tracker_output: str = DEFAULT_TRACKER_SNAPSHOT,
+    tracker_events: str = DEFAULT_TRACKER_EVENTS,
+    tracker_snapshot_every: int = 10,
+    tracker_radius_mm: float = FruitTracker.DEFAULT_MATCH_RADIUS_MM,
+    tracker_max_age_frames: int = FruitTracker.DEFAULT_MAX_AGE_FRAMES,
 ) -> bool:
     """Run live vision loop and optional display.
 
@@ -167,12 +176,28 @@ def run_live_vision(
             f"RMS {cal.fit.rms_residual_mm:.2f} mm"
         )
 
+    tracker: Optional[FruitTracker] = None
+    tracker_snapshot_path: Optional[Path] = None
+    tracker_events_path: Optional[Path] = None
+    if tracking_enabled:
+        tracker = FruitTracker(
+            match_radius_mm=tracker_radius_mm,
+            max_age_frames=tracker_max_age_frames,
+        )
+        if tracker_output:
+            tracker_snapshot_path = Path(tracker_output)
+            tracker_snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        if tracker_events:
+            tracker_events_path = Path(tracker_events)
+            tracker_events_path.parent.mkdir(parents=True, exist_ok=True)
+
     print(
         f"Initializing vision system... "
         f"(imgsz={imgsz}, conf>={confidence_threshold}%, "
         f"person>={person_min_confidence}%, "
         f"enhance={'on' if enhance_low_light else 'off'}, "
-        f"quality={'on' if quality_enabled else 'off'})"
+        f"quality={'on' if quality_enabled else 'off'}, "
+        f"tracking={'on' if tracking_enabled else 'off'})"
     )
     vision = ImageRecognition(
         confidence=confidence_threshold,
@@ -234,16 +259,29 @@ def run_live_vision(
                 if ref is not None:
                     _annotate_quality(detections, ref)
 
+            if tracker is not None and detections:
+                frame_index = int(payload.get("frame_index", 0) or 0)
+                events = tracker.update(detections, frame_index, time.time())
+                if tracker_snapshot_path and frame_index % max(1, tracker_snapshot_every) == 0:
+                    tracker.write_snapshot(str(tracker_snapshot_path))
+                if tracker_events_path and events:
+                    for ev in events:
+                        tracker.append_event(str(tracker_events_path), ev)
+
             if detections:
                 stats["frames_with_detections"] += 1
                 stats["total_detections"] += len(detections)
                 best = max(detections, key=lambda d: d.get("confidence", 0))
                 stats["last_best_detection"] = best
 
+                track_suffix = ""
+                if best.get("track_id") is not None:
+                    track_suffix = f" track #{best['track_id']}"
                 print(
                     f"[Frame {payload.get('frame_index', 0)}] "
                     f"{best.get('label', 'unknown')} "
                     f"({best.get('confidence', 0):.2f}%)"
+                    f"{track_suffix}"
                 )
                 # Temporarily muted in live output while keeping coordinate logic active.
                 # pos = best.get("position_m", {}) or {}
@@ -574,8 +612,8 @@ def main() -> int:
         help="Skip board-mm annotation; run uncalibrated",
     )
     live.add_argument(
-        "--imgsz", type=int, default=640,
-        help="YOLO inference size in px (default 640)",
+        "--imgsz", type=int, default=832,
+        help="YOLO inference size in px (default 832)",
     )
     live.add_argument(
         "--enhance", action="store_true",
@@ -588,6 +626,32 @@ def main() -> int:
     live.add_argument(
         "--person-min-confidence", type=int, default=40,
         help="Drop person detections below this %% (default 40)",
+    )
+    live.add_argument(
+        "--no-tracking", action="store_true",
+        help="Skip per-frame ID tracking (no track_id, no outputs/latest_tracks.json)",
+    )
+    live.add_argument(
+        "--tracker-output", default=DEFAULT_TRACKER_SNAPSHOT,
+        help=f"Tracker snapshot path (default {DEFAULT_TRACKER_SNAPSHOT}; empty string disables)",
+    )
+    live.add_argument(
+        "--tracker-events", default=DEFAULT_TRACKER_EVENTS,
+        help=f"Tracker events JSONL path (default {DEFAULT_TRACKER_EVENTS}; empty string disables)",
+    )
+    live.add_argument(
+        "--tracker-snapshot-every", type=int, default=10,
+        help="Write the tracker snapshot every N frames (default 10)",
+    )
+    live.add_argument(
+        "--tracker-radius-mm", type=float,
+        default=FruitTracker.DEFAULT_MATCH_RADIUS_MM,
+        help=f"Match radius in mm (default {FruitTracker.DEFAULT_MATCH_RADIUS_MM:.0f})",
+    )
+    live.add_argument(
+        "--tracker-max-age-frames", type=int,
+        default=FruitTracker.DEFAULT_MAX_AGE_FRAMES,
+        help=f"Forget a track after this many unseen frames (default {FruitTracker.DEFAULT_MAX_AGE_FRAMES})",
     )
 
     snap = sub.add_parser("snapshot", help="Capture and save one frame")
@@ -652,6 +716,12 @@ def main() -> int:
             enhance_low_light=args.enhance,
             quality_enabled=not args.no_quality,
             person_min_confidence=args.person_min_confidence,
+            tracking_enabled=not args.no_tracking,
+            tracker_output=args.tracker_output,
+            tracker_events=args.tracker_events,
+            tracker_snapshot_every=args.tracker_snapshot_every,
+            tracker_radius_mm=args.tracker_radius_mm,
+            tracker_max_age_frames=args.tracker_max_age_frames,
         ) else 1
     if args.command == "snapshot":
         return 0 if capture_and_save_snapshot(

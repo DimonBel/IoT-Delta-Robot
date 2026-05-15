@@ -196,8 +196,30 @@ New `live` flags tuned for "see small fruit at distance":
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--imgsz INT` | 640 | YOLO inference size. Bigger = better small-object recall, slower. |
+| `--imgsz INT` | 832 | YOLO inference size. Bigger = better small-object recall, slower. |
 | `--confidence INT` | 25 | Min YOLO conf in %. Drops produce floor; people are gated separately. |
 | `--person-min-confidence INT` | 40 | Drops weak person detections after YOLO so the overlay isn't flooded. |
 | `--enhance` | off | Apply CLAHE on the L channel before YOLO. Helps in dim lighting; ~2-5 ms cost. |
 | `--no-quality` | off | Skip the `quality` annotation if not needed. |
+
+### 4.4 Live ID tracking (`track_id`)
+
+`vision.tracker.FruitTracker` assigns each produce detection a stable integer `track_id` across frames using greedy nearest-neighbour matching in board-frame millimetres. The detection dict gains `detection["track_id"]`. The live overlay draws a cyan dot + crosshair at the (u, v) used for `board_xy_mm` and prints `#<id>` next to it — this is the visual signal that the coord lands on the fruit centre, not its edge.
+
+Two output files (in `outputs/`, gitignored):
+
+- **`outputs/latest_tracks.json`** — overwritten every `--tracker-snapshot-every` frames (default 10). Lists currently-active tracks: `track_id`, `label`, `board_xy_mm`, `quality_grade`, `hits`, `age_frames`, `first_frame`, `last_frame`, `last_seen_ts`. Suitable for a robot script that just reads "what to pick now".
+- **`outputs/track_events.jsonl`** — appended on `new` or `lost` events only (not per frame). Useful audit/replay.
+
+Flags on `live`:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--no-tracking` | off | Skip tracking entirely. |
+| `--tracker-output PATH` | `outputs/latest_tracks.json` | Snapshot path; empty string disables. |
+| `--tracker-events PATH` | `outputs/track_events.jsonl` | Events JSONL path; empty string disables. |
+| `--tracker-snapshot-every N` | 10 | Write snapshot every N frames. |
+| `--tracker-radius-mm FLOAT` | 40 | Match radius; smaller = stricter. |
+| `--tracker-max-age-frames N` | 60 | Forget tracks after N unseen frames (~2 s at 30 fps). |
+
+Matching is label-locked (an `orange` never merges with an `apple`). If a fruit moves more than `--tracker-radius-mm` between consecutive frames it gets a new ID.

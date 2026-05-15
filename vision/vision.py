@@ -30,7 +30,7 @@ class ImageRecognition:
         backend_every_n_frames: int = 1,
         auto_start: bool = True,
         debug: bool = False,
-        imgsz: int = 640,
+        imgsz: int = 832,
         enhance_low_light: bool = False,
         person_min_confidence: int = 40,
     ):
@@ -529,7 +529,7 @@ class ZEDYoloVisionPipeline(ZEDCoordinateVisionPipeline):
         backend_url: str = "",
         backend_timeout: float = 1.5,
         backend_every_n_frames: int = 1,
-        imgsz: int = 640,
+        imgsz: int = 832,
         enhance_low_light: bool = False,
         person_min_confidence: int = 40,
     ):
@@ -676,6 +676,53 @@ class ZEDYoloVisionPipeline(ZEDCoordinateVisionPipeline):
                 color,
                 2,
             )
+
+            # Centre marker: the actual (u, v) used to produce board_xy_mm.
+            # Uses refined_detection_center's output when present, else the
+            # bbox arithmetic-mean centre. Red so it's unmistakable against
+            # the type-coloured bbox; the white halo keeps it visible on red
+            # backgrounds (e.g. an apple).
+            center_uv = detection.get("center_uv")
+            if center_uv is None or len(center_uv) < 2:
+                cx = int(round((x1 + x2) / 2.0))
+                cy = int(round((y1 + y2) / 2.0))
+            else:
+                try:
+                    cx = int(round(float(center_uv[0])))
+                    cy = int(round(float(center_uv[1])))
+                except (TypeError, ValueError):
+                    cx = int(round((x1 + x2) / 2.0))
+                    cy = int(round((y1 + y2) / 2.0))
+            red = (0, 0, 255)
+            self._cv2.circle(overlay, (cx, cy), 6, (255, 255, 255), -1)
+            self._cv2.circle(overlay, (cx, cy), 4, red, -1)
+            self._cv2.drawMarker(
+                overlay, (cx, cy), red,
+                self._cv2.MARKER_CROSS, 14, 2,
+            )
+
+            # Coordinate label next to the dot: board mm + track id.
+            bxy = detection.get("board_xy_mm") or {}
+            coord_bits: list[str] = []
+            track_id = detection.get("track_id")
+            if track_id is not None:
+                coord_bits.append(f"#{int(track_id)}")
+            if bxy.get("x") is not None and bxy.get("y") is not None:
+                coord_bits.append(f"X:{bxy['x']:+.0f} Y:{bxy['y']:+.0f} mm")
+            if coord_bits:
+                coord_text = "  ".join(coord_bits)
+                text_org = (cx + 10, cy + 18)
+                # Black halo for readability over any background.
+                self._cv2.putText(
+                    overlay, coord_text, text_org,
+                    self._cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                    (0, 0, 0), 3, self._cv2.LINE_AA,
+                )
+                self._cv2.putText(
+                    overlay, coord_text, text_org,
+                    self._cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                    red, 1, self._cv2.LINE_AA,
+                )
 
         if self._board_initialized and self._board_quad_corners is not None and self._np is not None:
             pts = self._board_quad_corners.reshape(-1, 1, 2).astype(int)

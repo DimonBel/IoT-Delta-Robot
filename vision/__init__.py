@@ -7,6 +7,7 @@ from vision.commands import (
     run_live_vision,
 )
 from vision.simple import live, snapshot, snapshot_dataset
+from vision.tracker import FruitTracker, Track
 
 __all__ = [
     "run_live_vision",
@@ -16,4 +17,6 @@ __all__ = [
     "live",
     "snapshot",
     "snapshot_dataset",
+    "FruitTracker",
+    "Track",
 ]
