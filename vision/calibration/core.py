@@ -73,6 +73,23 @@ class WorkZone:
 	def contains(self, x: float, y: float) -> bool:
 		return self.x_min <= x <= self.x_max and self.y_min <= y <= self.y_max
 
+	def is_subset_of(self, outer: "WorkZone") -> bool:
+		return (
+			self.x_min >= outer.x_min
+			and self.x_max <= outer.x_max
+			and self.y_min >= outer.y_min
+			and self.y_max <= outer.y_max
+		)
+
+	def clipped_to(self, outer: "WorkZone") -> "WorkZone":
+		"""Intersect this rectangle with `outer` (axis-aligned)."""
+		return WorkZone(
+			x_min=max(self.x_min, outer.x_min),
+			x_max=min(self.x_max, outer.x_max),
+			y_min=max(self.y_min, outer.y_min),
+			y_max=min(self.y_max, outer.y_max),
+		)
+
 	def to_dict(self) -> dict:
 		return {
 			"x_min": self.x_min,
@@ -80,6 +97,16 @@ class WorkZone:
 			"y_min": self.y_min,
 			"y_max": self.y_max,
 		}
+
+
+def default_master_workspace() -> WorkZone:
+	"""Full reachable XY workspace used as the single absolute robot frame."""
+	return WorkZone(
+		x_min=float(HARDWARE_LIMITS["x_min"]),
+		x_max=float(HARDWARE_LIMITS["x_max"]),
+		y_min=float(HARDWARE_LIMITS["y_min"]),
+		y_max=float(HARDWARE_LIMITS["y_max"]),
+	)
 
 
 @dataclass
@@ -132,7 +159,10 @@ class Calibration:
 	image_size: tuple[int, int]  # (W, H)
 	fit: PolyFit
 	points: list[CalibrationPoint]
+	"""Axis-aligned safe rectangle derived from calibration markers (legacy + pick filtering fallback)."""
 	work_zone: WorkZone
+	"""Absolute robot XY bounds for the master grid (hardware workspace frame)."""
+	master_workspace: WorkZone = field(default_factory=default_master_workspace)
 	active_zone: WorkZone | None = None
 	tool_center_offset: ToolCenterOffset = field(default_factory=ToolCenterOffset)
 	pick_height_z_mm: float = DEFAULT_PICK_HEIGHT_MM
@@ -151,30 +181,34 @@ class Calibration:
 		return self.fit.apply(u, v)
 
 	def apply_tool_center_offset(self, x_mm: float, y_mm: float) -> tuple[float, float]:
+		# Offset is stored as (robot_true - camera_fit), applied at runtime by addition.
 		return (
-			x_mm - self.tool_center_offset.x_mm,
-			y_mm - self.tool_center_offset.y_mm,
+			x_mm + self.tool_center_offset.x_mm,
+			y_mm + self.tool_center_offset.y_mm,
 		)
 
 	def is_inside_zone(self, x: float, y: float) -> bool:
 		return self.effective_active_zone().contains(x, y)
 
 	def to_dict(self) -> dict:
-		return {
+		out: dict = {
 			"schema_version": SCHEMA_VERSION,
 			"image_size": [int(self.image_size[0]), int(self.image_size[1])],
+			"master_workspace": self.master_workspace.to_dict(),
 			"fit": self.fit.to_dict(),
 			"calibration_points": [
 				{"u": p.u, "v": p.v, "X_mm": p.x_mm, "Y_mm": p.y_mm}
 				for p in self.points
 			],
 			"work_zone": self.work_zone.to_dict(),
-			"active_zone": self.effective_active_zone().to_dict(),
 			"tool_center_offset": self.tool_center_offset.to_dict(),
 			"pick_height_z_mm": self.pick_height_z_mm,
 			"created_at": self.created_at,
 			"notes": self.notes,
 		}
+		if self.active_zone is not None:
+			out["active_zone"] = self.active_zone.to_dict()
+		return out
 
 	@classmethod
 	def from_dict(cls, d: dict) -> "Calibration":
@@ -195,13 +229,16 @@ class Calibration:
 			for p in d["calibration_points"]
 		]
 		zone = WorkZone(**d["work_zone"])
-		active_zone_data = d.get("active_zone")
-		active_zone = WorkZone(**active_zone_data) if active_zone_data else zone
+		mw_data = d.get("master_workspace")
+		master_workspace = WorkZone(**mw_data) if mw_data else default_master_workspace()
+		active_zone_data = d.get("active_zone", None)
+		active_zone = WorkZone(**active_zone_data) if active_zone_data is not None else None
 		return cls(
 			image_size=(int(size[0]), int(size[1])),
 			fit=PolyFit.from_dict(d["fit"]),
 			points=points,
 			work_zone=zone,
+			master_workspace=master_workspace,
 			active_zone=active_zone,
 			tool_center_offset=ToolCenterOffset.from_dict(d.get("tool_center_offset")),
 			pick_height_z_mm=float(d.get("pick_height_z_mm", DEFAULT_PICK_HEIGHT_MM)),
@@ -330,7 +367,132 @@ def load_calibration(path: str) -> Calibration:
 	return Calibration.from_dict(data)
 
 
+def robot_bounds_from_pixel_rect(
+	calibration: Calibration,
+	u1: float,
+	v1: float,
+	u2: float,
+	v2: float,
+) -> WorkZone:
+	"""Map an axis-aligned pixel rectangle through the calibration into robot mm.
+
+	The polygon warped by lens/poly modelling becomes an axis-aligned bounding box
+	in robot coordinates using all four corners (pick-area filter only; coordinates
+	stay in the master robot frame).
+	"""
+	u_lo, u_hi = sorted((float(u1), float(u2)))
+	v_lo, v_hi = sorted((float(v1), float(v2)))
+	xs: list[float] = []
+	ys: list[float] = []
+	for u, v in (
+		(u_lo, v_lo),
+		(u_hi, v_lo),
+		(u_hi, v_hi),
+		(u_lo, v_hi),
+	):
+		x, y = calibration.pixel_to_robot_xy(u, v)
+		xs.append(x)
+		ys.append(y)
+	return WorkZone(
+		x_min=min(xs),
+		x_max=max(xs),
+		y_min=min(ys),
+		y_max=max(ys),
+	)
+
+
+def robot_bounds_from_quad_clicks(
+    calibration: Calibration,
+    corners_uv: Sequence[tuple[float, float]],
+) -> WorkZone:
+    """Map 4 pixel corners of the slave zone through calibration to a robot-frame bounding box.
+
+    Each clicked pixel corner is transformed to robot mm via the forward polynomial.
+    The axis-aligned bounding box of those points becomes the active_zone.
+    The zone is a FILTER ONLY — coordinates are never re-originated relative to it.
+    """
+    if len(corners_uv) < 3:
+        raise ValueError(
+            f"Need at least 3 corner clicks to define a zone, got {len(corners_uv)}"
+        )
+    xs: list[float] = []
+    ys: list[float] = []
+    for u, v in corners_uv:
+        x, y = calibration.pixel_to_robot_xy(float(u), float(v))
+        xs.append(x)
+        ys.append(y)
+    return WorkZone(
+        x_min=min(xs),
+        x_max=max(xs),
+        y_min=min(ys),
+        y_max=max(ys),
+    )
+
+
+def compute_tool_center_offset(
+	calibration: Calibration,
+	u: float,
+	v: float,
+	robot_x_mm: float,
+	robot_y_mm: float,
+) -> ToolCenterOffset:
+	"""Build delta offset such that robot = camera_fit_xy + offset (additive runtime).
+
+	Pass the gripper/tool TCP XY reported by the robot controller when lined up on
+	the clicked reference pixel."""
+	x_cam, y_cam = calibration.pixel_to_robot_xy(float(u), float(v))
+	return ToolCenterOffset(
+		x_mm=float(robot_x_mm) - x_cam,
+		y_mm=float(robot_y_mm) - y_cam,
+		source="manual_gripper_reference_point",
+	)
+
+
+def intersect_infinite_lines_2d(
+	p1: tuple[float, float],
+	p2: tuple[float, float],
+	p3: tuple[float, float],
+	p4: tuple[float, float],
+) -> tuple[float, float]:
+	"""Intersection of infinite lines (p1,p2) and (p3,p4) in image coordinates."""
+	x1, y1 = float(p1[0]), float(p1[1])
+	x2, y2 = float(p2[0]), float(p2[1])
+	x3, y3 = float(p3[0]), float(p3[1])
+	x4, y4 = float(p4[0]), float(p4[1])
+	denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+	if abs(denom) < 1e-12:
+		raise ValueError(
+			"The two edge lines are parallel or degenerate in pixel space; "
+			"pick auxiliary points further apart or not collinear with the corners."
+		)
+	px = (
+		(x1 * y2 - y1 * x2) * (x3 - x4) - (x1 - x2) * (x3 * y4 - y3 * x4)
+	) / denom
+	py = (
+		(x1 * y2 - y1 * x2) * (y3 - y4) - (y1 - y2) * (x3 * y4 - y3 * x4)
+	) / denom
+	return px, py
+
+
+def infer_missing_grid_corner_from_edge_points(
+	tr_uv: tuple[float, float],
+	bl_uv: tuple[float, float],
+	aux_right_edge_uv: tuple[float, float],
+	aux_top_edge_uv: tuple[float, float],
+) -> tuple[float, float]:
+	"""Infer pixel coords of the missing (+x,+y) grid corner (robot BR).
+
+	Visible corners (robot frame, axis-aligned printed grid):
+	  TL (-x,-y), BL (-x,+y), TR (+x,-y).  BR (+x,+y) may be outside the image.
+
+	Pick any extra pixel on the visible segment of the TR→BR edge
+	(`aux_right_edge_uv`, collinear with TR toward BR) and any extra pixel on the
+	BL→BR edge (`aux_top_edge_uv`). The intersection of those two lines is BR."""
+	return intersect_infinite_lines_2d(tr_uv, aux_right_edge_uv, bl_uv, aux_top_edge_uv)
+
+
 # ----- helpers for grid generation -----
+
 
 def generate_grid_targets(
 	rows: int,

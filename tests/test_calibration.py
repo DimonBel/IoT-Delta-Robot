@@ -19,12 +19,17 @@ from vision.calibration import (
     ToolCenterOffset,
     WorkZone,
     auto_select_degree,
+    compute_tool_center_offset,
     derive_work_zone,
     detection_center,
     fit_polynomial,
     generate_grid_targets,
+    infer_missing_grid_corner_from_edge_points,
+    intersect_infinite_lines_2d,
     load_calibration,
     pixel_to_robot_xy,
+    robot_bounds_from_pixel_rect,
+    robot_bounds_from_quad_clicks,
     save_calibration,
 )
 
@@ -110,6 +115,19 @@ class WorkZoneTests(unittest.TestCase):
         self.assertFalse(zone.contains(100.01, 0))
         self.assertFalse(zone.contains(0, 60))
 
+    def test_subset_and_clip(self):
+        outer = WorkZone(x_min=-100, x_max=100, y_min=-100, y_max=100)
+        inner = WorkZone(x_min=-10, x_max=10, y_min=-5, y_max=5)
+        self.assertTrue(inner.is_subset_of(outer))
+        self.assertFalse(outer.is_subset_of(inner))
+
+        half = WorkZone(x_min=0, x_max=100, y_min=0, y_max=100)
+        clip = inner.clipped_to(half)
+        self.assertEqual(clip.x_min, 0.0)
+        self.assertEqual(clip.x_max, 10.0)
+        self.assertEqual(clip.y_min, 0.0)
+        self.assertEqual(clip.y_max, 5.0)
+
     def test_derive_with_margin(self):
         # 200x200 grid centred at origin; 20 mm margin -> 160x160 zone.
         pts = [
@@ -146,6 +164,46 @@ class WorkZoneTests(unittest.TestCase):
             derive_work_zone(pts, margin_mm=20.0)
 
 
+class CvKeyHelperTests(unittest.TestCase):
+    def test_confirm_redo_quit_masks(self):
+        from vision.calibration.ui import _cv_key_confirm, _cv_key_quit, _cv_key_redo
+
+        self.assertTrue(_cv_key_confirm(ord("y")))
+        self.assertTrue(_cv_key_confirm(ord("Y")))
+        self.assertTrue(_cv_key_confirm(13))
+        self.assertTrue(_cv_key_confirm(ord(" ")))
+        self.assertFalse(_cv_key_confirm(-1))
+        self.assertTrue(_cv_key_quit(ord("q")))
+        self.assertTrue(_cv_key_quit(27))
+        self.assertTrue(_cv_key_redo(ord("N")))
+
+
+class PartialMasterGeometryTests(unittest.TestCase):
+    def test_infer_br_axis_aligned_pixel_square(self):
+        br = infer_missing_grid_corner_from_edge_points(
+            tr_uv=(100.0, 0.0),
+            bl_uv=(0.0, 100.0),
+            aux_right_edge_uv=(100.0, 55.0),
+            aux_top_edge_uv=(40.0, 100.0),
+        )
+        self.assertAlmostEqual(br[0], 100.0, places=9)
+        self.assertAlmostEqual(br[1], 100.0, places=9)
+
+    def test_infer_br_skewed_parallelogram_edges(self):
+        br = infer_missing_grid_corner_from_edge_points(
+            tr_uv=(120.0, 30.0),
+            bl_uv=(40.0, 120.0),
+            aux_right_edge_uv=(135.0, 85.0),
+            aux_top_edge_uv=(95.0, 130.0),
+        )
+        self.assertAlmostEqual(br[0], 150.0, places=9)
+        self.assertAlmostEqual(br[1], 140.0, places=9)
+
+    def test_parallel_lines_raise(self):
+        with self.assertRaises(ValueError):
+            intersect_infinite_lines_2d((0.0, 0.0), (10.0, 0.0), (0.0, 1.0), (25.0, 1.0))
+
+
 class GridTargetsTests(unittest.TestCase):
     def test_3x3_centred_at_origin(self):
         targets = generate_grid_targets(rows=3, cols=3, spacing_mm=100.0)
@@ -174,6 +232,13 @@ class ManualWizardHelpersTests(unittest.TestCase):
         stages = _manual_stage_plan()
         self.assertEqual([stage.label for stage in stages], ["master grid", "slave grid", "robot point"])
         self.assertEqual([stage.count for stage in stages], [4, 4, 1])
+
+    def test_slave_robot_stages_defaults(self):
+        from vision.calibration.ui import _slave_robot_stages
+
+        stages = _slave_robot_stages()
+        self.assertEqual([stage.label for stage in stages], ["Slave grid (step 2)", "Robot TCP reference (step 3)"])
+        self.assertEqual([stage.count for stage in stages], [4, 1])
 
     def test_manual_stage_plan_rejects_invalid_counts(self):
         from vision.calibration.ui import _manual_stage_plan
@@ -222,6 +287,7 @@ class IORoundTripTests(unittest.TestCase):
         np.testing.assert_allclose(loaded.fit.coeffs_y, cal.fit.coeffs_y, atol=1e-9)
         self.assertAlmostEqual(loaded.fit.rms_residual_mm, cal.fit.rms_residual_mm)
         self.assertEqual(loaded.work_zone.to_dict(), cal.work_zone.to_dict())
+        self.assertEqual(loaded.master_workspace.to_dict(), cal.master_workspace.to_dict())
         self.assertEqual(loaded.active_zone.to_dict(), cal.active_zone.to_dict())
         self.assertEqual(loaded.tool_center_offset.to_dict(), cal.tool_center_offset.to_dict())
         self.assertEqual(loaded.pick_height_z_mm, cal.pick_height_z_mm)
@@ -249,15 +315,29 @@ class IORoundTripTests(unittest.TestCase):
     def test_old_schema_without_new_fields_still_loads(self):
         cal = self._build_calibration()
         data = cal.to_dict()
-        data.pop("active_zone")
-        data.pop("tool_center_offset")
+        data.pop("active_zone", None)
+        data.pop("tool_center_offset", None)
+        data.pop("master_workspace", None)
         data["schema_version"] = 1
 
         loaded = Calibration.from_dict(data)
 
         self.assertEqual(loaded.work_zone.to_dict(), cal.work_zone.to_dict())
-        self.assertEqual(loaded.active_zone.to_dict(), cal.work_zone.to_dict())
+        self.assertIsNone(loaded.active_zone)
+        self.assertEqual(loaded.effective_active_zone().to_dict(), cal.work_zone.to_dict())
         self.assertEqual(loaded.tool_center_offset.to_dict(), ToolCenterOffset().to_dict())
+
+    def test_active_zone_key_absent_means_implicit_work_zone(self):
+        cal = self._build_calibration()
+        data = cal.to_dict()
+        data.pop("active_zone", None)
+        loaded = Calibration.from_dict(data)
+        self.assertIsNone(loaded.active_zone)
+
+    def test_to_dict_omits_none_active_zone(self):
+        cal = self._build_calibration()
+        cal.active_zone = None
+        self.assertNotIn("active_zone", cal.to_dict())
 
 
 class AutoDegreeTests(unittest.TestCase):
@@ -365,14 +445,19 @@ class CalibratorTests(unittest.TestCase):
     def test_transform_pixel_applies_tool_center_offset(self):
         wrap = Calibrator(_make_calibration_with_offset_and_active_zone())
         x, y = wrap.transform_pixel(370, 290)
-        self.assertAlmostEqual(x, 55.0, places=5)
-        self.assertAlmostEqual(y, 48.0, places=5)
+        self.assertAlmostEqual(x, 45.0, places=5)
+        self.assertAlmostEqual(y, 52.0, places=5)
 
     def test_active_zone_filtering_does_not_change_coordinates(self):
         wrap = Calibrator(_make_calibration_with_offset_and_active_zone())
+        x_raw, y_raw = pixel_to_robot_xy(
+            wrap.calibration, 370, 290, image_size=(640, 480)
+        )
         x, y = wrap.transform_pixel(370, 290)
-        self.assertAlmostEqual(x, 55.0, places=5)
-        self.assertAlmostEqual(y, 48.0, places=5)
+        self.assertAlmostEqual(x_raw, 50.0, places=5)
+        self.assertAlmostEqual(y_raw, 50.0, places=5)
+        self.assertAlmostEqual(x, 45.0, places=5)
+        self.assertAlmostEqual(y, 52.0, places=5)
         self.assertTrue(wrap.is_inside_zone(x, y))
 
     def test_transform_pixel_image_size_mismatch_raises(self):
@@ -400,6 +485,29 @@ class CalibratorTests(unittest.TestCase):
         self.assertIsNone(wrap.transform_detection({}))
 
 
+class ToolCenterOffsetRegressionTests(unittest.TestCase):
+    def test_additive_runtime_matches_controller_example(self):
+        cal = _make_calibration()
+        off = compute_tool_center_offset(cal, 370.0, 290.0, 100.0, 50.0)
+        self.assertAlmostEqual(off.x_mm, 50.0, places=4)
+        self.assertAlmostEqual(off.y_mm, 0.0, places=4)
+        cal.tool_center_offset = off
+        wrap = Calibrator(cal)
+        x, y = wrap.transform_pixel(370, 290)
+        self.assertAlmostEqual(x, 100.0, places=4)
+        self.assertAlmostEqual(y, 50.0, places=4)
+
+    def test_robot_bounds_from_pixels_non_empty(self):
+        cal = _make_calibration()
+        z = robot_bounds_from_pixel_rect(cal, 360.0, 280.0, 380.0, 300.0)
+        self.assertLess(z.x_min, z.x_max)
+        self.assertLess(z.y_min, z.y_max)
+        mid_x = 0.5 * (z.x_min + z.x_max)
+        mid_y = 0.5 * (z.y_min + z.y_max)
+        self.assertAlmostEqual(mid_x, 50.0, delta=0.5)
+        self.assertAlmostEqual(mid_y, 50.0, delta=0.5)
+
+
 class AnnotateBoardMmTests(unittest.TestCase):
     """Integration tests for vision.commands._annotate_board_mm.
 
@@ -422,9 +530,15 @@ class AnnotateBoardMmTests(unittest.TestCase):
         ]
         annotate(detections, wrap, image_size=(640, 480))
 
-        self.assertAlmostEqual(detections[0]["board_xy_mm"]["x"], 55.0, places=2)
-        self.assertAlmostEqual(detections[0]["board_xy_mm"]["y"], 48.0, places=2)
-        self.assertTrue(detections[0]["board_xy_mm"]["inside_zone"])
+        b0 = detections[0]["board_xy_mm"]
+        self.assertAlmostEqual(b0["x_raw"], 50.0, places=2)
+        self.assertAlmostEqual(b0["y_raw"], 50.0, places=2)
+        self.assertAlmostEqual(b0["x"], 45.0, places=2)
+        self.assertAlmostEqual(b0["y"], 52.0, places=2)
+        self.assertTrue(b0["inside_zone"])
+        self.assertEqual(b0["frame"], "robot_master_mm")
+        self.assertEqual(b0["zone_mode"], "active_zone_filter_only")
+        self.assertTrue(b0["center_correction_applied"])
 
         self.assertFalse(detections[1]["board_xy_mm"]["inside_zone"])
         self.assertIsNotNone(detections[1]["board_xy_mm"]["x"])  # mm still emitted
@@ -432,6 +546,8 @@ class AnnotateBoardMmTests(unittest.TestCase):
 
         self.assertIsNone(detections[2]["board_xy_mm"]["x"])
         self.assertIsNone(detections[2]["board_xy_mm"]["y"])
+        self.assertIsNone(detections[2]["board_xy_mm"]["x_raw"])
+        self.assertIsNone(detections[2]["board_xy_mm"]["y_raw"])
         self.assertFalse(detections[2]["board_xy_mm"]["inside_zone"])
 
     def test_image_size_mismatch_marks_error(self):
@@ -442,6 +558,8 @@ class AnnotateBoardMmTests(unittest.TestCase):
         self.assertEqual(detections[0]["board_xy_mm"]["error"], "image_size_mismatch")
         self.assertIsNone(detections[0]["board_xy_mm"]["x"])
         self.assertIsNone(detections[0]["board_xy_mm"]["y"])
+        self.assertIsNone(detections[0]["board_xy_mm"]["x_raw"])
+        self.assertIsNone(detections[0]["board_xy_mm"]["y_raw"])
         self.assertFalse(detections[0]["board_xy_mm"]["inside_zone"])
 
     def test_no_calibrator_is_noop(self):
@@ -552,6 +670,84 @@ class RefinedDetectionCenterTests(unittest.TestCase):
         d = {"label": "orange"}
         self.assertIsNone(refined(d, None))
         self.assertNotIn("center_method", d)
+
+
+class QuadZoneTests(unittest.TestCase):
+    """Tests for 4-click slave zone: robot_bounds_from_quad_clicks."""
+
+    def test_quad_zone_bounding_box_matches_4_corners(self):
+        cal = _make_calibration()
+        # Calibration: X = u - 320, Y = v - 240.  Pick 4 pixel corners.
+        # pixel (270,190) -> (-50,-50), (370,190) -> (50,-50),
+        # (370,290) -> (50,50),  (270,290) -> (-50,50)
+        corners = [(270.0, 190.0), (370.0, 190.0), (370.0, 290.0), (270.0, 290.0)]
+        zone = robot_bounds_from_quad_clicks(cal, corners)
+        self.assertAlmostEqual(zone.x_min, -50.0, places=4)
+        self.assertAlmostEqual(zone.x_max,  50.0, places=4)
+        self.assertAlmostEqual(zone.y_min, -50.0, places=4)
+        self.assertAlmostEqual(zone.y_max,  50.0, places=4)
+
+    def test_quad_zone_coordinates_stay_in_master_frame(self):
+        """Active zone must never change the master-frame coordinates of a point."""
+        cal = _make_calibration()
+        corners = [(270.0, 190.0), (370.0, 190.0), (370.0, 290.0), (270.0, 290.0)]
+        zone = robot_bounds_from_quad_clicks(cal, corners)
+        cal.active_zone = zone
+        # Point inside the zone
+        x, y = pixel_to_robot_xy(cal, 320.0, 240.0)  # -> (0, 0)
+        self.assertAlmostEqual(x, 0.0, places=4)
+        self.assertAlmostEqual(y, 0.0, places=4)
+        self.assertTrue(zone.contains(x, y))
+
+    def test_quad_zone_fewer_than_3_corners_raises(self):
+        cal = _make_calibration()
+        with self.assertRaises(ValueError):
+            robot_bounds_from_quad_clicks(cal, [(100.0, 100.0), (200.0, 200.0)])
+
+    def test_labels_object_type_is_now_skip(self):
+        from vision.labels import classify_yolo_label
+        dtype, _ = classify_yolo_label("bicycle")
+        self.assertEqual(dtype, "skip")
+        dtype2, _ = classify_yolo_label("car")
+        self.assertEqual(dtype2, "skip")
+        dtype3, _ = classify_yolo_label("chair")
+        self.assertEqual(dtype3, "skip")
+
+    def test_labels_produce_and_human_still_pass(self):
+        from vision.labels import classify_yolo_label
+        dtype, _ = classify_yolo_label("apple")
+        self.assertEqual(dtype, "produce")
+        dtype2, _ = classify_yolo_label("person")
+        self.assertEqual(dtype2, "human")
+
+
+class WizardArgTests(unittest.TestCase):
+    """Argument-parser smoke tests for --wizard (no OpenCV / camera required)."""
+
+    def _parser(self):
+        from vision.calibration.ui import _build_arg_parser
+        return _build_arg_parser()
+
+    def test_wizard_flag_accepted(self):
+        args = self._parser().parse_args(["--image", "dummy.jpg", "--wizard"])
+        self.assertTrue(args.wizard)
+
+    def test_wizard_defaults_to_false(self):
+        args = self._parser().parse_args(["--image", "dummy.jpg"])
+        self.assertFalse(args.wizard)
+
+    def test_wizard_with_live(self):
+        args = self._parser().parse_args(["--live", "--wizard"])
+        self.assertTrue(args.wizard)
+        self.assertTrue(args.live)
+
+    def test_wizard_accepts_grid_and_spacing(self):
+        args = self._parser().parse_args(
+            ["--image", "dummy.jpg", "--wizard", "--grid", "4x4", "--spacing", "80"]
+        )
+        self.assertTrue(args.wizard)
+        self.assertEqual(args.grid, (4, 4))
+        self.assertAlmostEqual(args.spacing, 80.0)
 
 
 if __name__ == "__main__":

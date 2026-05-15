@@ -13,7 +13,14 @@ from typing import Sequence
 
 import numpy as np
 
-from .core import Calibration, CalibrationPoint, PolyFit, WorkZone, fit_polynomial
+from .core import (
+    Calibration,
+    CalibrationPoint,
+    PolyFit,
+    WorkZone,
+    auto_select_degree,
+    fit_polynomial,
+)
 
 
 def fit_inverse_polynomial(
@@ -65,9 +72,12 @@ def draw_result_image(
     overlay = image_bgr.copy()
     h_img, w_img = overlay.shape[:2]
 
-    # Inverse fit (robot mm -> pixel) just for the visualization.
+    # Inverse fit (robot mm -> pixel) for visualization only.
+    # Use degree 2 when enough points exist so the perspective warp is captured;
+    # degree 1 is only a linear affine and stretches badly on a tilted camera.
     try:
-        inverse_fit = fit_inverse_polynomial(calibration.points, degree=1)
+        inv_degree = 2 if len(calibration.points) >= 6 else 1
+        inverse_fit = fit_inverse_polynomial(calibration.points, degree=inv_degree)
     except ValueError:
         inverse_fit = None
 
@@ -77,15 +87,20 @@ def draw_result_image(
     )
     cv2.polylines(overlay, board_pts, isClosed=True, color=(0, 200, 0), thickness=2)
 
-    # Active zone (cyan), drawn via inverse fit if available.
+    # Active zone drawn via inverse fit, clipped to image bounds.
+    # Color (255, 255, 0) in BGR = true cyan (matches live overlay and legend).
     if inverse_fit is not None:
         zone_pts_mm = _zone_perimeter_robot(calibration.effective_active_zone(), samples_per_edge)
         zone_pts_px = []
         for (x_mm, y_mm) in zone_pts_mm:
             u, v = inverse_fit.apply(x_mm, y_mm)
-            zone_pts_px.append([int(round(u)), int(round(v))])
+            # Hard-clip to image bounds so the polygon never exits the frame.
+            zone_pts_px.append([
+                int(max(0, min(w_img - 1, round(u)))),
+                int(max(0, min(h_img - 1, round(v)))),
+            ])
         zone_arr = np.array([zone_pts_px], dtype=np.int32)
-        cv2.polylines(overlay, zone_arr, isClosed=True, color=(0, 255, 255), thickness=2)
+        cv2.polylines(overlay, zone_arr, isClosed=True, color=(255, 255, 0), thickness=2)
 
     # Calibration markers + their robot-frame labels.
     for p in calibration.points:

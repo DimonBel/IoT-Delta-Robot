@@ -993,9 +993,7 @@ class ZEDYoloVisionPipeline(ZEDCoordinateVisionPipeline):
         }
 
         overlay_detections = []
-        overlay_types = frozenset(
-            {"produce", "human", "base_board", "delta_robot", "object"}
-        )
+        overlay_types = frozenset({"produce", "human"})
 
         if should_run_yolo and yolo_results:
             result = yolo_results[0]

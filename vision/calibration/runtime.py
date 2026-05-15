@@ -14,7 +14,7 @@ Designed to be the one-line entry point used inside the live loop:
         robot.pick()
 
 `transform_detection` returns None when the bbox is missing/invalid OR when the
-predicted point falls outside the saved work zone, so the caller can write a
+corrected TCP position falls outside the effective active zone, so the caller can write a
 single `if target is not None:` guard instead of branching twice.
 """
 
@@ -140,7 +140,8 @@ def refined_detection_center(
 class Calibrator:
     """Small façade over a loaded Calibration. Use this in the runtime loop.
 
-    Doesn't import OpenCV. Doesn't touch the camera. Pure pixel -> robot mm.
+    Doesn't import OpenCV. Doesn't touch the camera. Maps pixels through the
+    saved polynomial into master-frame mm, then applies the tool-centre offset.
     """
 
     DEFAULT_PATH = "calibration/calibration.json"
@@ -170,13 +171,36 @@ class Calibrator:
         v: float,
         image_size: tuple[int, int] | None = None,
     ) -> tuple[float, float]:
-        """Pixel -> (X_mm, Y_mm) in robot frame.
+        """Pixel -> (X_mm, Y_mm) in robot frame after tool-centre offset.
 
-        Pass `image_size=(W, H)` to assert the runtime resolution matches the
-        calibrated one. Mismatch raises ValueError.
+        Raw polynomial board coordinates use `Calibration.pixel_to_robot_xy`; this
+        adds the saved gripper TCP correction so `x/y` match the robot controller.
         """
         x_mm, y_mm = pixel_to_robot_xy(self._cal, u, v, image_size=image_size)
         return self._cal.apply_tool_center_offset(x_mm, y_mm)
+
+    def board_xy_payload(
+        self,
+        u: float,
+        v: float,
+        image_size: tuple[int, int] | None = None,
+    ) -> dict:
+        """Structured pixel -> robot mapping for telemetry (raw vs corrected)."""
+        x_raw, y_raw = pixel_to_robot_xy(self._cal, u, v, image_size=image_size)
+        off = self._cal.tool_center_offset
+        x_corr = x_raw + off.x_mm
+        y_corr = y_raw + off.y_mm
+        applied = abs(off.x_mm) > 1e-12 or abs(off.y_mm) > 1e-12
+        return {
+            "x_raw": round(float(x_raw), 2),
+            "y_raw": round(float(y_raw), 2),
+            "x": round(float(x_corr), 2),
+            "y": round(float(y_corr), 2),
+            "inside_zone": bool(self.is_inside_zone(x_corr, y_corr)),
+            "frame": "robot_master_mm",
+            "zone_mode": "active_zone_filter_only",
+            "center_correction_applied": applied,
+        }
 
     def is_inside_zone(self, x_mm: float, y_mm: float) -> bool:
         return self._cal.is_inside_zone(x_mm, y_mm)
@@ -190,7 +214,7 @@ class Calibrator:
 
         Returns None when:
           - the detection has no/invalid `bbox_xyxy`, or
-          - the predicted point is outside the saved work zone.
+          - the corrected TCP position is outside the effective active zone.
 
         Z is the configured pick-height from calibration.json.
         """
