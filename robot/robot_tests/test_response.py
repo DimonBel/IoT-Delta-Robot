@@ -1,6 +1,7 @@
 from robot_controller import RobotController
 import time as t
 
+
 with RobotController(port="COM6") as rc:
     is_delta = rc.is_delta()
     print(f"isdelta resp: {is_delta}")
@@ -13,18 +14,24 @@ with RobotController(port="COM6") as rc:
     rc.set_motion(speed=200, acceleration=1000)
     t.sleep(0.5)
     
-    # rc.move_to(X=0, Y=0, Z=-850, U=0, V=0, W=70)
-    rc.move_to(X=0, Y=0, Z=-780)
+    # rc.move_to(X=0, Y=0, Z=-780, U=45, V=45, W=0)
     
-    for _ in range(5):
-        rc.move_to(X=250, Y=250, Z=-850)
-        rc.move_to(X=-250, Y=250, Z=-850)
-        rc.move_to(X=250, Y=-250, Z=-850)
-        rc.move_to(X=-250, Y=-250, Z=-850)
+    rc.move_to(X=0, Y=0, Z=-790)
+    
+    # for _ in range(10):
+    #     rc.move_to(X=100, Y=100, Z=-750)
+    #     rc.move_to(X=-100, Y=100, Z=-750)
+    #     rc.move_to(X=100, Y=-100, Z=-750)
+    #     rc.move_to(X=-100, Y=-100, Z=-750)
+    
+    # for _ in range(1):
+    #     rc.move_to(X=250, Y=250, Z=-850)
+    #     rc.move_to(X=-250, Y=250, Z=-850)
+    #     rc.move_to(X=250, Y=-250, Z=-850)
+    #     rc.move_to(X=-250, Y=-250, Z=-850)
         
-        rc.move_to(X=200, Y=200, Z=-780)
-        rc.move_to(X=-200, Y=200, Z=-780)
-        rc.move_to(X=200, Y=-200, Z=-780)
-        rc.move_to(X=-200, Y=-200, Z=-780)
-    
+    #     rc.move_to(X=200, Y=200, Z=-780)
+    #     rc.move_to(X=-200, Y=200, Z=-780)
+    #     rc.move_to(X=200, Y=-200, Z=-780)
+    #     rc.move_to(X=-200, Y=-200, Z=-780)
     
