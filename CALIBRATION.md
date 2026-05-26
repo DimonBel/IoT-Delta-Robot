@@ -1,108 +1,104 @@
 # Camera ↔ Robot Calibration
 
-This package maps a **camera image pixel `(u, v)` → robot table coordinate `(X_mm, Y_mm)`** so that detections from the ZED camera can be sent to the Delta robot in its own frame. Z is treated as a fixed pick-height for now.
+Maps a **camera image pixel `(u, v)`** to a **robot table coordinate `(X_mm, Y_mm)`** so detections from the ZED can be sent to the Delta robot in its own frame. Z is a fixed pick-height (configured, not calibrated).
 
-Calibration is done **once per camera mount**, saved to `calibration/calibration.json`, and reused at runtime.
+Calibration is **once per camera mount**: print a marker grid, run one command, click each marker. Save → reuse.
 
 ## Layout
 
 ```
 vision/calibration/
   __init__.py    public API re-exports
-  __main__.py    `python -m vision.calibration` -> usage summary
-  core.py        math + IO  (numpy only — no OpenCV)
-  draw.py        result-image rendering  (cv2, lazy import)
-  runtime.py     ergonomic Calibrator wrapper for the live loop
-  ui.py          interactive click-and-confirm UI
-  demo.py        one-shot stereo-photo demo with auto green-marker detection
-  verify.py      load saved JSON + map a single pixel from the CLI
+  __main__.py    `python -m vision.calibration` → usage summary
+  core.py        math + IO (numpy only — no OpenCV)
+  draw.py        annotated result image (cv2, lazy import)
+  runtime.py     Calibrator wrapper for the live loop
+  ui.py          interactive click UI
+  verify.py      CLI sanity-check
 calibration/
   markers_template.md   how to print and place the marker grid
   calibration.json      (gitignored — generated per machine)
-  *.png                 (gitignored — annotated result/debug images)
+  *.png                 (gitignored — annotated result images)
 tests/
   test_calibration.py   unit tests, no camera/robot/cv2 required
 ```
 
-`vision/vision.py` (the ZED + YOLO pipeline) and the `robot/` and `main/` packages are **not** modified by calibration.
+`vision/vision.py` (the ZED + YOLO pipeline) and the `robot/` and `main/` packages are not modified by calibration.
 
-## Quick start
+## Quick start — 6 clicks, that's it
 
-### 1. Unit tests (no hardware, no cv2)
+You need one printed square on the work board (any visible, well-defined square). You also need to know the side length in mm, and you need to know the robot XY of one reference point inside the square (the "home" — wherever the gripper sits when you call it home; can be off-centre).
 
+1. **Print / tape a square** of known side length on the work board (default `--side 200` mm). Three of its corners must be visible in the camera; the fourth can be off-screen or occluded.
+2. **Park the robot at home** so you can see where the gripper tip lands in the image.
+3. **Run**:
+   ```
+   python -m vision.calibration.ui --live --side 200 --home-x 0 --home-y 0
+   ```
+4. **Click 6 points** in this order:
+   1. Top-LEFT corner of the square.
+   2. Top-RIGHT corner.
+   3. Bottom-LEFT corner.
+   4. Any point on the **right edge** (between TR and the hidden BR).
+   5. Any point on the **bottom edge** (between BL and the hidden BR).
+   6. The robot **HOME** position (where the gripper sits).
+5. Press **Y / Enter / Space** to confirm each click, **N** to redo, **Q / Esc** to abort.
+6. **Done.** `calibration/calibration.json` is written + `calibration/calibration_result.png` for eyeballing.
+
+The 4th corner (BR) is inferred by intersecting the lines `(TR, right-helper)` and `(BL, bottom-helper)`. The square is treated as centred at the robot origin (0, 0); the home click is one extra labelled data point at the user-supplied `(home-x, home-y)` mm. If your hidden corner is somewhere other than BR, **rotate the printed square** so the hidden one ends up at BR.
+
+Static-photo mode (no camera):
 ```
-python -m unittest tests.test_calibration -v
-```
-
-Expected: 20 tests pass.
-
-### 2. Click UI on a static photo (offline)
-
-```
-python -m vision.calibration.ui --image samples/top_down.jpg \
-    --grid 3x3 --spacing 100 --out calibration/calibration.json
-```
-
-Click each marker in row-major order (top-left first). `y` confirms, `n` redoes, `q` quits. Outputs:
-
-- `calibration/calibration.json` — the saved transform.
-- `calibration/calibration_result.png` — annotated verification image.
-
-`--live` swaps the input source to a single ZED frame (requires the ZED SDK).
-
-If you want the staged manual workflow instead, use `--manual-wizard`. That
-mode walks you through:
-
-1. 4 master-grid clicks.
-2. 4 slave-grid clicks.
-3. 1 final robot-reference point.
-4. Typing the robot X,Y coordinates after each confirmed click.
-
-In the camera view, the clicked point is shown as a red cross while the saved
-points are marked in green after confirmation.
-### 3. One-shot demo on the stereo photo
-
-```
-python -m vision.calibration.demo --image PATH/TO/stereo_photo.jpg
+python -m vision.calibration.ui --image samples/board.jpg --side 200 --home-x 0 --home-y 0
 ```
 
-Auto-splits the stereo image, picks the LEFT view, detects bright-green corner markers, fits an affine transform, and writes:
+That's the whole calibration. There's no "slave grid", no "active zone", no "tool-centre wizard" — just six clicks.
 
-- `calibration/calibration.json`
-- `calibration/calibration_result.png` — clicked markers + work-zone outline.
-- `calibration/calibration_debug.png` — every detected blob with the chosen four ringed.
-- `calibration/calibration_mask.png` — raw HSV mask, useful when tuning the green range.
+## JSON schema (v2)
 
-## Runtime flow (after calibration is saved)
-
-When the camera films live and YOLO detects an object:
-
-```
-                vision/vision.py  (ZED + YOLO)
-                       │
-                       ▼
-            detection.bbox_xyxy  ──►  centre pixel (u, v)
-                                          │
-                                          ▼
-                          load_calibration("calibration/calibration.json")
-                                          │
-                                          ▼
-                          calibration.pixel_to_robot_xy(u, v)
-                                          │
-                                          ▼
-                          (X_mm, Y_mm) in robot frame
-                                          │
-                                          ▼
-                          calibration.is_inside_zone(X, Y) ?  ── no ──► skip
-                                          │
-                                          ▼
-                          Z = calibration.pick_height_z_mm
-                                          │
-                                          ▼
-                          robot.move_to(X, Y, Z) → robot.pick()
+```json
+{
+  "schema_version": 2,
+  "image_size": [W, H],
+  "fit": {
+    "type": "poly2",
+    "coeffs_x": [a0, a1, a2, a3, a4, a5],
+    "coeffs_y": [b0, b1, b2, b3, b4, b5],
+    "rms_residual_mm": 1.8
+  },
+  "calibration_points": [
+    { "u": 312, "v": 248, "X_mm": -100, "Y_mm": -100 }
+  ],
+  "work_zone": { "x_min": -180, "x_max": 180, "y_min": -180, "y_max": 180 },
+  "robot_home_mm": { "x": 0.0, "y": 0.0 },
+  "pick_height_z_mm": -940,
+  "created_at": "2026-05-15T12:34:56Z",
+  "notes": ""
+}
 ```
 
-In code, once `RobotController` exists, the glue inside `main.main.automatic_loop()` collapses to a few lines via the `Calibrator` helper:
+**Old v1 JSONs are refused.** If you have one, the next live run will print a clear "please re-run calibration" error. Re-running step 3 above regenerates the file in v2.
+
+## Flags
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--image PATH` / `--live` | (mutex, required) | Source of the frame. |
+| `--live-preview` | off | Live window to aim before grabbing (live only). |
+| `--live-warmup-frames N` | 5 | Discard N frames before grabbing (live, no preview). |
+| `--save-camera-frame PATH` | off | Save the captured frame for the record. |
+| `--side FLOAT` | 200 | Side length of the printed square in mm. |
+| `--home-x FLOAT` | 0 | Robot X of the home pixel (mm). |
+| `--home-y FLOAT` | 0 | Robot Y of the home pixel (mm). |
+| `--out PATH` | `calibration/calibration.json` | Saved JSON. |
+| `--pick-height-z FLOAT` | -940 | Robot Z used at runtime. |
+| `--degree {1,2,3}` | auto | Polynomial degree override (default: 1, the 5 points pick an affine fit). |
+| `--result-image PATH` | (next to --out) | Annotated PNG; `""` disables. |
+| `--notes STR` | "" | Free-text note in JSON. |
+
+## Runtime flow (live loop)
+
+Saved calibration is loaded **once** at startup, then each detection gets a `board_xy_mm: {x, y, inside_zone}` field:
 
 ```python
 from vision.calibration import Calibrator
@@ -110,79 +106,45 @@ from vision.calibration import Calibrator
 cal = Calibrator.load()                             # once at startup
 
 # per detection in the loop:
-target = cal.transform_detection(detection)        # (X, Y, Z) or None
+target = cal.transform_detection(detection)        # (X_mm, Y_mm, Z_mm) or None
 if target is None:
     continue                                        # missing bbox or outside zone
 robot.move_to(*target)
 robot.pick()
 ```
 
-`Calibrator.transform_detection` reads `bbox_xyxy` from the detection dict, transforms the bbox centre, rejects out-of-zone points, and returns `(X_mm, Y_mm, Z_mm)` ready for the robot. The lower-level functions (`pixel_to_robot_xy`, `is_inside_zone`) are still exported if you need them.
-
-That integration step is **not** part of this PR — it waits on a real `RobotController`.
+`Calibrator.transform_detection` returns `None` when the bbox is missing or the predicted point falls outside the saved work zone. Robot-side picks up `board_xy_mm.x` / `.y` straight off the detection — that wiring is intentionally not part of this package.
 
 ### Quick CLI sanity check
 
 ```
 python -m vision.calibration                       # usage summary
-python -m vision.calibration.verify --summary      # show metadata of saved cal
+python -m vision.calibration.verify --summary      # metadata of saved cal
 python -m vision.calibration.verify --pixel 320 240
 ```
 
 ## Live integration (camera side)
 
-`python -m vision.commands live` now loads the saved calibration and annotates every detection with **board-frame mm**:
+`python -m vision.commands live` loads the saved calibration and annotates every detection with **board-frame mm**:
 
 ```json
 "board_xy_mm": {"x": 12.3, "y": -45.0, "inside_zone": true}
 ```
 
-Origin is the centre of the calibrated work area (per the saved JSON), X grows right, Y grows up. The colleague's `board_map` UV in `[0..1]` and the 3D `position_m` are kept untouched alongside.
-
-By default a missing calibration file is a hard error:
-
-```
-python -m vision.commands live --duration 10
-> ERROR: calibration file not found at calibration/calibration.json
-> Run `python -m vision.calibration.ui --image PATH ...` first,
-> or pass --no-calibration to run live without board-mm coords.
-```
-
-Useful flags on `live`:
-
-| Flag | Effect |
-|---|---|
-| `--calibration PATH` | Load a calibration JSON from a non-default path. |
-| `--no-calibration` | Skip the load; live runs without `board_xy_mm`. |
-| `--print-coordinates` | Also prints 3D camera coords AND board mm per best detection. |
-
 Edge cases handled in-place:
 
 - **No bbox on a detection** → `board_xy_mm: {"x": null, "y": null, "inside_zone": false}`.
-- **Image size mismatch** (live frame vs calibrated resolution) → `board_xy_mm: {"x": null, "y": null, "inside_zone": false, "error": "image_size_mismatch"}`. Recalibrate at the new resolution.
-
-Robot integration (calling `robot.move_to(x_mm, y_mm, z_mm)`) is intentionally **not** wired here. Whoever owns the robot side picks `board_xy_mm` straight off the detection and decides on Z, gripping, and frame conversion.
+- **Image size mismatch** (live frame vs calibrated resolution) → adds `"error": "image_size_mismatch"`. Recalibrate at the new resolution.
+- **Missing calibration JSON** → clean error, prompts you to run the calibration UI; or pass `--no-calibration` to run uncalibrated.
 
 ## When to recalibrate
 
-- **Camera physically moves** (the cage was nudged, the mount tightened, etc.).
-- **Resolution changes** (HD720 ↔ VGA). The JSON stores `image_size` and `pixel_to_robot_xy` raises if a runtime image size is passed that does not match.
-- **Markers were repositioned** on the table.
+- The camera physically moves.
+- Resolution changes (HD720 ↔ VGA). `image_size` is stored; runtime raises on mismatch.
+- Markers were repositioned on the table.
 
-Anything else (different lighting, different fruit, different time of day) does **not** require recalibration.
-
-## What gets committed
-
-- New: `vision/calibration/{__init__,core,draw,ui,demo}.py`, `tests/test_calibration.py`, `calibration/markers_template.md`, this `CALIBRATION.md`.
-- Modified: `.gitignore`.
-- Ignored: `calibration/calibration.json`, `calibration/*.png`, `tests/photo_*.jpg`.
-
-## Out of scope (future work)
-
-- Z-axis calibration (currently a configured constant).
-- Auto chessboard / ArUco detection (manual click + green-corner demo are enough today).
-- `RobotController` and live integration with `main/main.py`.
+Lighting, different fruit, different time of day do **not** require recalibration.
 
 ## Related: live quality grading, ID tracking, detection-range flags
 
-Each produce detection in `live` also carries a fuzzy `quality` field (grade, defect_score, issues, memberships) **and** a stable `track_id` from a centroid tracker in board mm. Two output files land in `outputs/` (gitignored): `latest_tracks.json` (overwritten every few frames) and `track_events.jsonl` (append-only audit). New `live` defaults (`--confidence 25`, `--imgsz 832`, `--person-min-confidence 40`) and the `--enhance / --no-quality / --no-tracking / --tracker-*` flags are documented in [vision/README.md §4.2 / §4.3 / §4.4](vision/README.md).
+Each produce detection in `live` also carries a fuzzy `quality` field and a stable `track_id` from a centroid tracker in board mm. Output files land in `outputs/` (gitignored): `latest_tracks.json` (overwritten every 10 frames by default) and `track_events.jsonl` (append-only audit). Live defaults (`--confidence 25`, `--imgsz 832`, `--person-min-confidence 40`) and the `--enhance / --no-quality / --no-tracking / --tracker-*` flags are documented in [vision/README.md §4.2 / §4.3 / §4.4](vision/README.md).

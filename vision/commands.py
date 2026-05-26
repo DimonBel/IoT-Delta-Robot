@@ -51,10 +51,9 @@ def _annotate_board_mm(
 ) -> None:
     """Add `board_xy_mm` to every detection in-place.
 
-    Field shape includes raw polynomial XY (`x_raw`, `y_raw`), corrected TCP XY
-    (`x`, `y`) after the saved tool-centre offset, and zone flags. Coordinates
-    are always expressed in the master robot workspace frame (mm); the active
-    zone only filters pickability and does not re-origin coordinates.
+    Field shape: {"x": float|None, "y": float|None, "inside_zone": bool, "error"?: str}
+    Coordinates are robot-frame mm produced by the saved polynomial fit;
+    `inside_zone` is True when the point sits inside the saved work zone.
 
     When `rgb_frame` is provided, the per-detection (u, v) is refined via
     `refined_detection_center` (sphere-aware silhouette fit). Otherwise it
@@ -62,31 +61,28 @@ def _annotate_board_mm(
     """
     if calibrator is None:
         return
-    empty_board = {
-        "x": None,
-        "y": None,
-        "x_raw": None,
-        "y_raw": None,
-        "inside_zone": False,
-    }
     for d in detections:
         if rgb_frame is not None:
             center = refined_detection_center(d, rgb_frame)
         else:
             center = detection_center(d)
         if center is None:
-            d["board_xy_mm"] = dict(empty_board)
+            d["board_xy_mm"] = {"x": None, "y": None, "inside_zone": False}
             continue
         u, v = center
         try:
-            payload = calibrator.board_xy_payload(u, v, image_size=image_size)
+            x_mm, y_mm = calibrator.transform_pixel(u, v, image_size=image_size)
         except ValueError:
             d["board_xy_mm"] = {
-                **empty_board,
+                "x": None, "y": None, "inside_zone": False,
                 "error": "image_size_mismatch",
             }
             continue
-        d["board_xy_mm"] = payload
+        d["board_xy_mm"] = {
+            "x": round(float(x_mm), 2),
+            "y": round(float(y_mm), 2),
+            "inside_zone": bool(calibrator.is_inside_zone(x_mm, y_mm)),
+        }
 
 
 def _annotate_quality(
