@@ -156,8 +156,8 @@ class Calibration:
             raise ValueError(
                 f"Calibration schema v{version} found; this build expects "
                 f"v{SCHEMA_VERSION}. Please re-run "
-                f"`python -m vision.calibration.ui --live --grid 3x3 --spacing 100 "
-                f"--home-x 0 --home-y 0` to regenerate the JSON."
+                f"`python -m vision.calibration.ui --live --side 980` "
+                f"to regenerate the JSON."
             )
         size = d["image_size"]
         points = [

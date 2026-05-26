@@ -1,34 +1,28 @@
-"""Interactive 6-click calibration UI.
+"""Interactive 5-click calibration UI.
 
-One simple flow: click 3 visible square corners + 2 edge helpers (so the
-4th corner can be inferred) + the robot's home position. That's 6 clicks
-total, produces 5 (pixel, robot_mm) calibration pairs.
+Click all 4 corners of the printed square + the robot home position.
 
 Modes:
     --image PATH    load a static photo (offline, no camera needed)
     --live          grab a frame from the ZED camera
 
 Usage:
-    python -m vision.calibration.ui --live --side 200 --home-x 0 --home-y 0
-    python -m vision.calibration.ui --image samples/board.jpg --side 200
+    python -m vision.calibration.ui --live --side 980 --home-x 0 --home-y 0
+    python -m vision.calibration.ui --image samples/board.jpg --side 980
 
-Workflow (6 clicks, robot-frame labels — NOT image-space "top/bottom"):
+Workflow (5 clicks, robot-frame labels — NOT image-space "top/bottom"):
     1. Corner at (-X, -Y).
     2. Corner at (-X, +Y).
     3. Corner at (+X, -Y).
-    4. Any point on the +X edge (between (+X,-Y) and the hidden (+X,+Y)).
-    5. Any point on the +Y edge (between (-X,+Y) and the hidden (+X,+Y)).
-    6. Robot HOME position (where the gripper tip is when robot is at home).
+    4. Corner at (+X, +Y).
+    5. Robot HOME position (where the gripper tip is when robot is at home).
 
 Press Y / Enter / Space to confirm each click, N to redo, Q / Esc to abort.
 
 Geometry (square centred at robot origin (0, 0)):
     (-X, -Y) = (-side/2, -side/2)     (+X, -Y) = (+side/2, -side/2)
-    (-X, +Y) = (-side/2, +side/2)     (+X, +Y) = (+side/2, +side/2)  (inferred)
+    (-X, +Y) = (-side/2, +side/2)     (+X, +Y) = (+side/2, +side/2)
     HOME = (--home-x, --home-y)       (anywhere inside or near the square)
-
-The hidden corner is always (+X, +Y) — orient the printed square so that
-corner is the one you can't click in the image.
 """
 
 from __future__ import annotations
@@ -58,15 +52,12 @@ class _ClickState:
 
 
 # Stage labels (robot-frame coordinates, NOT image-space "top/bottom").
-# Hidden corner is always the one at (+X, +Y); orient the printed square so
-# that corner is the one out of view / occluded.
 _STAGE_LABELS = (
-    "1/6  Corner at (-X, -Y)",
-    "2/6  Corner at (-X, +Y)",
-    "3/6  Corner at (+X, -Y)",
-    "4/6  Helper on the +X edge (between (+X,-Y) and hidden (+X,+Y))",
-    "5/6  Helper on the +Y edge (between (-X,+Y) and hidden (+X,+Y))",
-    "6/6  ROBOT HOME (gripper position; mm given by --home-x / --home-y)",
+    "1/5  Corner at (-X, -Y)",
+    "2/5  Corner at (-X, +Y)",
+    "3/5  Corner at (+X, -Y)",
+    "4/5  Corner at (+X, +Y)",
+    "5/5  ROBOT HOME (gripper position; mm given by --home-x / --home-y)",
 )
 
 
@@ -435,13 +426,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: expected 6 clicks, got {len(clicks)}", file=sys.stderr)
         return 1
 
-    # Click order matches _STAGE_LABELS:
-    #   0: corner at (-X, -Y)
-    #   1: corner at (-X, +Y)
-    #   2: corner at (+X, -Y)
-    #   3: helper on +X edge (collinear with click 2 and the hidden (+X, +Y))
-    #   4: helper on +Y edge (collinear with click 1 and the hidden (+X, +Y))
-    #   5: home
     mxmy_uv, mxpy_uv, pxmy_uv, helper_px_edge, helper_py_edge, home_uv = clicks
 
     try:
