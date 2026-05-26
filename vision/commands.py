@@ -122,7 +122,7 @@ def _fmt_meters(value: Any) -> str:
 
 def run_live_vision(
     duration_seconds: int = 0,
-    confidence_threshold: int = 25,
+    confidence_threshold: int = 15,
     model: str = "medium",
     algorithm: str = "yolo",
     skip_display: bool = False,
@@ -130,7 +130,7 @@ def run_live_vision(
     print_coordinates: bool = False,
     calibration_required: bool = True,
     calibration_path: str = DEFAULT_CALIBRATION_PATH,
-    imgsz: int = 832,
+    imgsz: int = 1280,
     enhance_low_light: bool = False,
     quality_enabled: bool = True,
     person_min_confidence: int = 40,
@@ -143,9 +143,9 @@ def run_live_vision(
 ) -> bool:
     """Run live vision loop and optional display.
 
-    Defaults are tuned for "see small fruit at distance":
-      - confidence_threshold=25 (people are gated separately at person_min_confidence)
-      - imgsz=640 for sharper small-object recall
+    Defaults are tuned aggressively for "see small fruit at distance":
+      - confidence_threshold=15 (people are gated separately at person_min_confidence)
+      - imgsz=1280 for sharper small-object recall (was 832 / 640 / 416 in earlier iterations)
       - enhance_low_light=False (opt in via the --enhance CLI flag)
       - quality_enabled=True attaches a fuzzy quality grade to produce detections
 
@@ -593,8 +593,8 @@ def main() -> int:
     live = sub.add_parser("live", help="Run live ZED+YOLO stream")
     live.add_argument("--duration", type=int, default=0)
     live.add_argument(
-        "--confidence", type=int, default=25,
-        help="Min YOLO confidence in %% (default 25; people gated separately at --person-min-confidence)",
+        "--confidence", type=int, default=15,
+        help="Min YOLO confidence in %% (default 15; people gated separately at --person-min-confidence)",
     )
     live.add_argument("--model", default="medium")
     live.add_argument("--algorithm", default="yolo", choices=["yolo", "zed"])
@@ -612,8 +612,8 @@ def main() -> int:
         help="Skip board-mm annotation; run uncalibrated",
     )
     live.add_argument(
-        "--imgsz", type=int, default=832,
-        help="YOLO inference size in px (default 832)",
+        "--imgsz", type=int, default=1280,
+        help="YOLO inference size in px (default 1280)",
     )
     live.add_argument(
         "--enhance", action="store_true",
