@@ -1,28 +1,33 @@
-"""Interactive 5-click calibration UI.
+"""Interactive 6-click calibration UI.
 
-Click all 4 corners of the printed square + the robot home position.
+Click 3 visible corners of the printed square + 2 edge helpers (so the 4th
+corner is inferred by line intersection) + the robot home position.
 
 Modes:
     --image PATH    load a static photo (offline, no camera needed)
     --live          grab a frame from the ZED camera
 
 Usage:
-    python -m vision.calibration.ui --live --side 980 --home-x 0 --home-y 0
-    python -m vision.calibration.ui --image samples/board.jpg --side 980
+    python -m vision.calibration.ui --live --side 940 --home-x 0 --home-y 0
+    python -m vision.calibration.ui --image samples/board.jpg --side 940
 
-Workflow (5 clicks, robot-frame labels — NOT image-space "top/bottom"):
+Workflow (6 clicks, robot-frame labels — NOT image-space "top/bottom"):
     1. Corner at (-X, -Y).
     2. Corner at (-X, +Y).
     3. Corner at (+X, -Y).
-    4. Corner at (+X, +Y).
-    5. Robot HOME position (where the gripper tip is when robot is at home).
+    4. Any point on the +X edge (between (+X,-Y) and the hidden (+X,+Y)).
+    5. Any point on the +Y edge (between (-X,+Y) and the hidden (+X,+Y)).
+    6. Robot HOME position (where the gripper tip is when robot is at home).
 
 Press Y / Enter / Space to confirm each click, N to redo, Q / Esc to abort.
 
 Geometry (square centred at robot origin (0, 0)):
     (-X, -Y) = (-side/2, -side/2)     (+X, -Y) = (+side/2, -side/2)
-    (-X, +Y) = (-side/2, +side/2)     (+X, +Y) = (+side/2, +side/2)
+    (-X, +Y) = (-side/2, +side/2)     (+X, +Y) = (+side/2, +side/2)  (inferred)
     HOME = (--home-x, --home-y)       (anywhere inside or near the square)
+
+The hidden corner is always (+X, +Y) — orient the printed square so that
+corner is the one you can't click in the image.
 """
 
 from __future__ import annotations
@@ -52,12 +57,15 @@ class _ClickState:
 
 
 # Stage labels (robot-frame coordinates, NOT image-space "top/bottom").
+# Hidden corner is always the one at (+X, +Y); orient the printed square so
+# that corner is the one out of view / occluded.
 _STAGE_LABELS = (
-    "1/5  Corner at (-X, -Y)",
-    "2/5  Corner at (-X, +Y)",
-    "3/5  Corner at (+X, -Y)",
-    "4/5  Corner at (+X, +Y)",
-    "5/5  ROBOT HOME (gripper position; mm given by --home-x / --home-y)",
+    "1/6  Corner at (-X, -Y)",
+    "2/6  Corner at (-X, +Y)",
+    "3/6  Corner at (+X, -Y)",
+    "4/6  Helper on the +X edge (between (+X,-Y) and hidden (+X,+Y))",
+    "5/6  Helper on the +Y edge (between (-X,+Y) and hidden (+X,+Y))",
+    "6/6  ROBOT HOME (gripper position; mm given by --home-x / --home-y)",
 )
 
 
@@ -181,16 +189,16 @@ def _grab_live_frame(*, preview: bool, warmup_frames: int = 5):
 # ----- click collection ------------------------------------------------
 
 _STAGE_COLOURS_BGR = [
-    (0, 220, 0),     # TL corner - green
-    (0, 220, 0),     # TR corner - green
-    (0, 220, 0),     # BL corner - green
-    (0, 200, 220),   # right edge helper - amber
-    (0, 200, 220),   # bottom edge helper - amber
-    (0, 0, 220),     # home - red
+    (0, 220, 0),     # (-X, -Y) corner     - green
+    (0, 220, 0),     # (-X, +Y) corner     - green
+    (0, 220, 0),     # (+X, -Y) corner     - green
+    (0, 200, 220),   # +X edge helper      - amber
+    (0, 200, 220),   # +Y edge helper      - amber
+    (0, 0, 220),     # ROBOT HOME          - red
 ]
 
 
-def _draw_six_overlay(img, collected_px, current_idx, pending_click):
+def _draw_overlay(img, collected_px, current_idx, pending_click):
     """Draw the in-progress 6-click overlay with stage label + collected points."""
     import cv2
 
@@ -222,7 +230,7 @@ def _draw_six_overlay(img, collected_px, current_idx, pending_click):
     return overlay
 
 
-def collect_six_clicks(img) -> list[tuple[float, float]]:
+def collect_clicks(img) -> list[tuple[float, float]]:
     """Walk the operator through the 6 stages. Returns 6 (u, v) pixel pairs.
 
     Raises KeyboardInterrupt if the operator aborts.
@@ -243,7 +251,7 @@ def collect_six_clicks(img) -> list[tuple[float, float]]:
     idx = 0
     try:
         while idx < len(_STAGE_LABELS):
-            overlay = _draw_six_overlay(img, collected, idx, state.last_click)
+            overlay = _draw_overlay(img, collected, idx, state.last_click)
             cv2.imshow(window, overlay)
             key = _cv_read_key(30)
 
@@ -417,7 +425,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {label}")
 
     try:
-        clicks = collect_six_clicks(image)
+        clicks = collect_clicks(image)
     except KeyboardInterrupt:
         print("Calibration aborted.", file=sys.stderr)
         return 1
@@ -426,20 +434,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: expected 6 clicks, got {len(clicks)}", file=sys.stderr)
         return 1
 
+    # Click order: 3 visible corners + 2 edge helpers + home.
     mxmy_uv, mxpy_uv, pxmy_uv, helper_px_edge, helper_py_edge, home_uv = clicks
 
+    # Infer the hidden (+X, +Y) corner from the two edge lines.
     try:
         pxpy_uv = infer_hidden_corner(
-            corner_a_uv=pxmy_uv,    helper_a_uv=helper_px_edge,
-            corner_b_uv=mxpy_uv,    helper_b_uv=helper_py_edge,
+            corner_a_uv=pxmy_uv, helper_a_uv=helper_px_edge,
+            corner_b_uv=mxpy_uv, helper_b_uv=helper_py_edge,
         )
     except ValueError as exc:
         print(f"ERROR: could not infer hidden (+X, +Y) corner: {exc}", file=sys.stderr)
+        print("       Helpers were collinear/degenerate; redo with them further apart.",
+              file=sys.stderr)
         return 1
 
-    print(
-        f"Inferred (+X, +Y) corner pixel: ({pxpy_uv[0]:.1f}, {pxpy_uv[1]:.1f})"
-    )
+    print(f"Inferred (+X, +Y) corner pixel: ({pxpy_uv[0]:.1f}, {pxpy_uv[1]:.1f})")
 
     points = build_square_calibration_points(
         mxmy_uv=mxmy_uv, mxpy_uv=mxpy_uv, pxmy_uv=pxmy_uv, pxpy_uv=pxpy_uv,

@@ -34,15 +34,15 @@ tests/
 
 `vision/vision.py` (the ZED + YOLO pipeline) and the `robot/` and `main/` packages are not modified by calibration.
 
-## Quick start — 6 clicks, that's it
+## Quick start — 6 clicks (3 visible corners + 2 edge helpers + home)
 
-You need one printed square on the work board (any visible, well-defined square). You also need to know the side length in mm, and you need to know the robot XY of one reference point inside the square (the "home" — wherever the gripper sits when you call it home; can be off-centre).
+You need one printed square on the work board. Three corners must be visible; the fourth (the corner at `(+X, +Y)`) can be off-screen or occluded — it gets inferred by intersecting two edge lines. You also need to know the side length in mm and the robot XY of the home position (where the gripper sits when parked).
 
-1. **Print / tape a square** of known side length on the work board (default `--side 200` mm). Three of its corners must be visible in the camera; the fourth can be off-screen or occluded.
+1. **Print / tape a square** of known side length on the work board (e.g. `--side 940` for a 94 cm square). Orient it so the corner at robot `(+X, +Y)` is the one out of view; the other three must be clickable.
 2. **Park the robot at home** so you can see where the gripper tip lands in the image.
 3. **Run**:
    ```
-   python -m vision.calibration.ui --live --side 200 --home-x 0 --home-y 0
+   python -m vision.calibration.ui --live --side 940 --home-x 0 --home-y 0
    ```
 4. **Click 6 points** in this order. Labels are in the **robot frame** (the axes your robot controller reports), NOT image-space "top/bottom":
    1. Corner at **(−X, −Y)**.
@@ -54,7 +54,7 @@ You need one printed square on the work board (any visible, well-defined square)
 5. Press **Y / Enter / Space** to confirm each click, **N** to redo, **Q / Esc** to abort.
 6. **Done.** `calibration/calibration.json` is written + `calibration/calibration_result.png` for eyeballing.
 
-The hidden 4th corner — always the one at **(+X, +Y)** — is inferred by intersecting the lines `((+X,−Y), +X-helper)` and `((−X,+Y), +Y-helper)`. The square is treated as centred at the robot origin (0, 0), so corners sit at `(±side/2, ±side/2)` in robot mm. The home click is one extra labelled data point at the user-supplied `(--home-x, --home-y)` mm. **Orient the printed square so the corner you can't see is the one at (+X, +Y) in your robot frame.**
+The hidden 4th corner — always **(+X, +Y)** — is computed by intersecting the lines `((+X, −Y), +X-helper)` and `((−X, +Y), +Y-helper)`. The square is treated as centred at the robot origin (0, 0), so corners sit at `(±side/2, ±side/2)` in robot mm. The home click is one extra labelled data point at the user-supplied `(--home-x, --home-y)` mm. **Place the two edge helpers as far from their corners as you can** (without leaving the visible edge) — helpers close to their corner cause the inferred 4th corner to extrapolate wildly.
 
 Static-photo mode (no camera):
 ```
