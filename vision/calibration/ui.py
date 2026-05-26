@@ -113,9 +113,13 @@ def _load_static_image(path: str):
 def _bgr_from_zed_frame(frame: dict, *, prefer_clean: bool = True):
     """Pull the clean RGB BGR array out of a vision.get_frame() payload."""
     if prefer_clean:
-        img = frame.get("rgb") or frame.get("annotated_rgb")
+        img = frame.get("rgb")
+        if img is None:
+            img = frame.get("annotated_rgb")
     else:
-        img = frame.get("annotated_rgb") or frame.get("rgb")
+        img = frame.get("annotated_rgb")
+        if img is None:
+            img = frame.get("rgb")
     return img
 
 
