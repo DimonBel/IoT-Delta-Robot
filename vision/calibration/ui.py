@@ -12,22 +12,23 @@ Usage:
     python -m vision.calibration.ui --live --side 200 --home-x 0 --home-y 0
     python -m vision.calibration.ui --image samples/board.jpg --side 200
 
-Workflow (6 clicks):
-    1. Top-LEFT corner of the printed square.
-    2. Top-RIGHT corner.
-    3. Bottom-LEFT corner.
-    4. Any point on the RIGHT edge (between TR and the hidden BR).
-    5. Any point on the BOTTOM edge (between BL and the hidden BR).
+Workflow (6 clicks, robot-frame labels — NOT image-space "top/bottom"):
+    1. Corner at (-X, -Y).
+    2. Corner at (-X, +Y).
+    3. Corner at (+X, -Y).
+    4. Any point on the +X edge (between (+X,-Y) and the hidden (+X,+Y)).
+    5. Any point on the +Y edge (between (-X,+Y) and the hidden (+X,+Y)).
     6. Robot HOME position (where the gripper tip is when robot is at home).
 
 Press Y / Enter / Space to confirm each click, N to redo, Q / Esc to abort.
 
 Geometry (square centred at robot origin (0, 0)):
-    TL = (-side/2, +side/2)        TR = (+side/2, +side/2)
-    BL = (-side/2, -side/2)        BR = (+side/2, -side/2)  (inferred)
-    HOME = (--home-x, --home-y)    (anywhere inside or near the square)
+    (-X, -Y) = (-side/2, -side/2)     (+X, -Y) = (+side/2, -side/2)
+    (-X, +Y) = (-side/2, +side/2)     (+X, +Y) = (+side/2, +side/2)  (inferred)
+    HOME = (--home-x, --home-y)       (anywhere inside or near the square)
 
-If your hidden corner is not BR, rotate the printed square so it is.
+The hidden corner is always (+X, +Y) — orient the printed square so that
+corner is the one you can't click in the image.
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ from .core import (
     build_square_calibration_points,
     derive_work_zone,
     fit_polynomial,
-    infer_hidden_br_corner,
+    infer_hidden_corner,
     save_calibration,
 )
 from .draw import draw_result_image
@@ -56,14 +57,16 @@ class _ClickState:
     last_click: tuple[int, int] | None = None
 
 
-# Stage labels shown in the overlay + console. Order matters.
+# Stage labels (robot-frame coordinates, NOT image-space "top/bottom").
+# Hidden corner is always the one at (+X, +Y); orient the printed square so
+# that corner is the one out of view / occluded.
 _STAGE_LABELS = (
-    "1/6  TOP-LEFT corner",
-    "2/6  TOP-RIGHT corner",
-    "3/6  BOTTOM-LEFT corner",
-    "4/6  Helper on RIGHT edge (between TR and hidden BR)",
-    "5/6  Helper on BOTTOM edge (between BL and hidden BR)",
-    "6/6  ROBOT HOME (where the gripper sits at home)",
+    "1/6  Corner at (-X, -Y)",
+    "2/6  Corner at (-X, +Y)",
+    "3/6  Corner at (+X, -Y)",
+    "4/6  Helper on the +X edge (between (+X,-Y) and hidden (+X,+Y))",
+    "5/6  Helper on the +Y edge (between (-X,+Y) and hidden (+X,+Y))",
+    "6/6  ROBOT HOME (gripper position; mm given by --home-x / --home-y)",
 )
 
 
@@ -432,20 +435,31 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: expected 6 clicks, got {len(clicks)}", file=sys.stderr)
         return 1
 
-    tl_uv, tr_uv, bl_uv, aux_right, aux_bottom, home_uv = clicks
+    # Click order matches _STAGE_LABELS:
+    #   0: corner at (-X, -Y)
+    #   1: corner at (-X, +Y)
+    #   2: corner at (+X, -Y)
+    #   3: helper on +X edge (collinear with click 2 and the hidden (+X, +Y))
+    #   4: helper on +Y edge (collinear with click 1 and the hidden (+X, +Y))
+    #   5: home
+    mxmy_uv, mxpy_uv, pxmy_uv, helper_px_edge, helper_py_edge, home_uv = clicks
 
     try:
-        br_uv = infer_hidden_br_corner(tr_uv, bl_uv, aux_right, aux_bottom)
+        pxpy_uv = infer_hidden_corner(
+            corner_a_uv=pxmy_uv,    helper_a_uv=helper_px_edge,
+            corner_b_uv=mxpy_uv,    helper_b_uv=helper_py_edge,
+        )
     except ValueError as exc:
-        print(f"ERROR: could not infer hidden BR corner: {exc}", file=sys.stderr)
+        print(f"ERROR: could not infer hidden (+X, +Y) corner: {exc}", file=sys.stderr)
         return 1
 
     print(
-        f"Inferred BR corner pixel: ({br_uv[0]:.1f}, {br_uv[1]:.1f})"
+        f"Inferred (+X, +Y) corner pixel: ({pxpy_uv[0]:.1f}, {pxpy_uv[1]:.1f})"
     )
 
     points = build_square_calibration_points(
-        tl_uv=tl_uv, tr_uv=tr_uv, bl_uv=bl_uv, br_uv=br_uv, home_uv=home_uv,
+        mxmy_uv=mxmy_uv, mxpy_uv=mxpy_uv, pxmy_uv=pxmy_uv, pxpy_uv=pxpy_uv,
+        home_uv=home_uv,
         side_mm=args.side,
         home_x_mm=args.home_x, home_y_mm=args.home_y,
     )

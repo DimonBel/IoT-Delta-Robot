@@ -1,5 +1,14 @@
 # Camera ↔ Robot Calibration
 
+1/6  Corner at (-X, -Y)
+2/6  Corner at (-X, +Y)
+3/6  Corner at (+X, -Y)
+4/6  Helper on the +X edge (between (+X,-Y) and hidden (+X,+Y))
+5/6  Helper on the +Y edge (between (-X,+Y) and hidden (+X,+Y))
+6/6  ROBOT HOME (gripper position; mm given by --home-x / --home-y)
+
+
+
 Maps a **camera image pixel `(u, v)`** to a **robot table coordinate `(X_mm, Y_mm)`** so detections from the ZED can be sent to the Delta robot in its own frame. Z is a fixed pick-height (configured, not calibrated).
 
 Calibration is **once per camera mount**: print a marker grid, run one command, click each marker. Save → reuse.
@@ -35,17 +44,17 @@ You need one printed square on the work board (any visible, well-defined square)
    ```
    python -m vision.calibration.ui --live --side 200 --home-x 0 --home-y 0
    ```
-4. **Click 6 points** in this order:
-   1. Top-LEFT corner of the square.
-   2. Top-RIGHT corner.
-   3. Bottom-LEFT corner.
-   4. Any point on the **right edge** (between TR and the hidden BR).
-   5. Any point on the **bottom edge** (between BL and the hidden BR).
+4. **Click 6 points** in this order. Labels are in the **robot frame** (the axes your robot controller reports), NOT image-space "top/bottom":
+   1. Corner at **(−X, −Y)**.
+   2. Corner at **(−X, +Y)**.
+   3. Corner at **(+X, −Y)**.
+   4. Any point on the **+X edge** (between (+X, −Y) and the hidden (+X, +Y)).
+   5. Any point on the **+Y edge** (between (−X, +Y) and the hidden (+X, +Y)).
    6. The robot **HOME** position (where the gripper sits).
 5. Press **Y / Enter / Space** to confirm each click, **N** to redo, **Q / Esc** to abort.
 6. **Done.** `calibration/calibration.json` is written + `calibration/calibration_result.png` for eyeballing.
 
-The 4th corner (BR) is inferred by intersecting the lines `(TR, right-helper)` and `(BL, bottom-helper)`. The square is treated as centred at the robot origin (0, 0); the home click is one extra labelled data point at the user-supplied `(home-x, home-y)` mm. If your hidden corner is somewhere other than BR, **rotate the printed square** so the hidden one ends up at BR.
+The hidden 4th corner — always the one at **(+X, +Y)** — is inferred by intersecting the lines `((+X,−Y), +X-helper)` and `((−X,+Y), +Y-helper)`. The square is treated as centred at the robot origin (0, 0), so corners sit at `(±side/2, ±side/2)` in robot mm. The home click is one extra labelled data point at the user-supplied `(--home-x, --home-y)` mm. **Orient the printed square so the corner you can't see is the one at (+X, +Y) in your robot frame.**
 
 Static-photo mode (no camera):
 ```

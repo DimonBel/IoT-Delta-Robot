@@ -338,36 +338,34 @@ def intersect_infinite_lines_2d(
     return px, py
 
 
-def infer_hidden_br_corner(
-    tr_uv: tuple[float, float],
-    bl_uv: tuple[float, float],
-    aux_right_edge_uv: tuple[float, float],
-    aux_bottom_edge_uv: tuple[float, float],
+def infer_hidden_corner(
+    corner_a_uv: tuple[float, float],
+    helper_a_uv: tuple[float, float],
+    corner_b_uv: tuple[float, float],
+    helper_b_uv: tuple[float, float],
 ) -> tuple[float, float]:
-    """Infer the hidden BR corner of a square from TR + BL + two edge helpers.
+    """Infer the hidden 4th corner of a square from two known corners + two edge helpers.
 
-    Convention (image axes, top-down camera):
+    The hidden corner sits at the intersection of:
+      - the line through `corner_a_uv` and `helper_a_uv` (the edge from
+        corner_a through the hidden corner)
+      - the line through `corner_b_uv` and `helper_b_uv` (the edge from
+        corner_b through the hidden corner)
 
-        TL ----------- TR
-         |              |          aux_right is on the TR -> BR edge
-         |              |
-        BL --aux_b-- ?BR?         aux_bottom is on the BL -> BR edge
-
-    BR is the intersection of the (TR, aux_right_edge) line and the
-    (BL, aux_bottom_edge) line. The helpers don't need to be near BR — any
-    other point on each edge is fine.
+    The helpers don't need to be close to the hidden corner — any other
+    point along each visible edge works.
     """
     return intersect_infinite_lines_2d(
-        tr_uv, aux_right_edge_uv, bl_uv, aux_bottom_edge_uv,
+        corner_a_uv, helper_a_uv, corner_b_uv, helper_b_uv,
     )
 
 
 def build_square_calibration_points(
     *,
-    tl_uv: tuple[float, float],
-    tr_uv: tuple[float, float],
-    bl_uv: tuple[float, float],
-    br_uv: tuple[float, float],
+    mxmy_uv: tuple[float, float],
+    mxpy_uv: tuple[float, float],
+    pxmy_uv: tuple[float, float],
+    pxpy_uv: tuple[float, float],
     home_uv: tuple[float, float],
     side_mm: float,
     home_x_mm: float,
@@ -376,22 +374,30 @@ def build_square_calibration_points(
     """Return the 5 (pixel, robot_mm) pairs from the 6-click flow.
 
     Square is centred at the robot origin (0, 0), so corners are at
-    (-S/2, +S/2), (+S/2, +S/2), (+S/2, -S/2), (-S/2, -S/2). Home is the
-    operator-supplied robot XY of the clicked home pixel — it can sit
-    anywhere inside or near the square; it does NOT need to be the centre.
+    (-S/2, -S/2), (-S/2, +S/2), (+S/2, -S/2), (+S/2, +S/2). Parameter names
+    encode robot-frame coordinates:
+
+        mxmy_uv  pixel of corner at (-X, -Y)
+        mxpy_uv  pixel of corner at (-X, +Y)
+        pxmy_uv  pixel of corner at (+X, -Y)
+        pxpy_uv  pixel of corner at (+X, +Y)   (typically the inferred / hidden one)
+
+    Home is the operator-supplied robot XY of the clicked home pixel — it
+    can sit anywhere inside or near the square; it does NOT need to be the
+    centre.
     """
     if side_mm <= 0:
         raise ValueError("side_mm must be positive")
     half = side_mm / 2.0
     return [
-        CalibrationPoint(u=float(tl_uv[0]), v=float(tl_uv[1]),
-                         x_mm=-half, y_mm=+half),
-        CalibrationPoint(u=float(tr_uv[0]), v=float(tr_uv[1]),
-                         x_mm=+half, y_mm=+half),
-        CalibrationPoint(u=float(br_uv[0]), v=float(br_uv[1]),
-                         x_mm=+half, y_mm=-half),
-        CalibrationPoint(u=float(bl_uv[0]), v=float(bl_uv[1]),
+        CalibrationPoint(u=float(mxmy_uv[0]), v=float(mxmy_uv[1]),
                          x_mm=-half, y_mm=-half),
+        CalibrationPoint(u=float(mxpy_uv[0]), v=float(mxpy_uv[1]),
+                         x_mm=-half, y_mm=+half),
+        CalibrationPoint(u=float(pxmy_uv[0]), v=float(pxmy_uv[1]),
+                         x_mm=+half, y_mm=-half),
+        CalibrationPoint(u=float(pxpy_uv[0]), v=float(pxpy_uv[1]),
+                         x_mm=+half, y_mm=+half),
         CalibrationPoint(u=float(home_uv[0]), v=float(home_uv[1]),
                          x_mm=float(home_x_mm), y_mm=float(home_y_mm)),
     ]

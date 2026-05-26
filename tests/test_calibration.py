@@ -23,7 +23,7 @@ from vision.calibration import (
     detection_center,
     fit_polynomial,
     generate_grid_targets,
-    infer_hidden_br_corner,
+    infer_hidden_corner,
     intersect_infinite_lines_2d,
     load_calibration,
     pixel_to_robot_xy,
@@ -520,66 +520,67 @@ class LineIntersectionTests(unittest.TestCase):
             )
 
 
-class HiddenBrCornerTests(unittest.TestCase):
-    def test_axis_aligned_square_recovers_br(self):
-        # Square TL=(0,0) TR=(100,0) BL=(0,100) BR=(100,100).
-        # Right edge: TR -> BR along x=100. Helper at (100, 40).
-        # Bottom edge: BL -> BR along y=100. Helper at (60, 100).
-        br = infer_hidden_br_corner(
-            tr_uv=(100.0, 0.0),
-            bl_uv=(0.0, 100.0),
-            aux_right_edge_uv=(100.0, 40.0),
-            aux_bottom_edge_uv=(60.0, 100.0),
+class HiddenCornerTests(unittest.TestCase):
+    def test_axis_aligned_square_recovers_hidden(self):
+        # Hidden corner at (100, 100); known corners at (100, 0) and (0, 100).
+        # Edge line from (100,0) through hidden has helper at (100, 40).
+        # Edge line from (0,100) through hidden has helper at (60, 100).
+        hidden = infer_hidden_corner(
+            corner_a_uv=(100.0, 0.0),
+            helper_a_uv=(100.0, 40.0),
+            corner_b_uv=(0.0, 100.0),
+            helper_b_uv=(60.0, 100.0),
         )
-        self.assertAlmostEqual(br[0], 100.0, places=6)
-        self.assertAlmostEqual(br[1], 100.0, places=6)
+        self.assertAlmostEqual(hidden[0], 100.0, places=6)
+        self.assertAlmostEqual(hidden[1], 100.0, places=6)
 
-    def test_perspective_skewed_square_recovers_br(self):
-        # Trapezoidal "square" from a slight perspective tilt.
-        # TR=(150,30), BL=(40,140). Pick helpers along edges that meet at BR=(170,160).
-        # Right edge line: through (150,30) and (170,160) -> sample helper at midpoint.
-        helper_right = (160.0, 95.0)
-        # Bottom edge line: through (40,140) and (170,160) -> sample helper.
-        helper_bottom = (105.0, 150.0)
-        br = infer_hidden_br_corner(
-            tr_uv=(150.0, 30.0),
-            bl_uv=(40.0, 140.0),
-            aux_right_edge_uv=helper_right,
-            aux_bottom_edge_uv=helper_bottom,
+    def test_perspective_skewed_square_recovers_hidden(self):
+        # Trapezoidal "square" from a slight perspective tilt. Corners (150,30)
+        # and (40,140) are known; helpers sit on their respective edges that
+        # meet at the hidden corner (170, 160).
+        helper_a = (160.0, 95.0)    # on the (150,30) -> (170,160) edge
+        helper_b = (105.0, 150.0)   # on the (40,140) -> (170,160) edge
+        hidden = infer_hidden_corner(
+            corner_a_uv=(150.0, 30.0),
+            helper_a_uv=helper_a,
+            corner_b_uv=(40.0, 140.0),
+            helper_b_uv=helper_b,
         )
-        self.assertAlmostEqual(br[0], 170.0, places=4)
-        self.assertAlmostEqual(br[1], 160.0, places=4)
+        self.assertAlmostEqual(hidden[0], 170.0, places=4)
+        self.assertAlmostEqual(hidden[1], 160.0, places=4)
 
 
 class BuildSquareCalibrationPointsTests(unittest.TestCase):
     def test_default_corners_at_half_side(self):
         pts = build_square_calibration_points(
-            tl_uv=(0, 0), tr_uv=(100, 0), bl_uv=(0, 100), br_uv=(100, 100),
+            mxmy_uv=(0, 100), mxpy_uv=(0, 0),
+            pxmy_uv=(100, 100), pxpy_uv=(100, 0),
             home_uv=(50, 50),
             side_mm=200.0, home_x_mm=0.0, home_y_mm=0.0,
         )
         self.assertEqual(len(pts), 5)
-        self.assertEqual((pts[0].x_mm, pts[0].y_mm), (-100.0, 100.0))   # TL
-        self.assertEqual((pts[1].x_mm, pts[1].y_mm), (100.0, 100.0))    # TR
-        self.assertEqual((pts[2].x_mm, pts[2].y_mm), (100.0, -100.0))   # BR
-        self.assertEqual((pts[3].x_mm, pts[3].y_mm), (-100.0, -100.0))  # BL
+        self.assertEqual((pts[0].x_mm, pts[0].y_mm), (-100.0, -100.0))  # mxmy
+        self.assertEqual((pts[1].x_mm, pts[1].y_mm), (-100.0, 100.0))   # mxpy
+        self.assertEqual((pts[2].x_mm, pts[2].y_mm), (100.0, -100.0))   # pxmy
+        self.assertEqual((pts[3].x_mm, pts[3].y_mm), (100.0, 100.0))    # pxpy
         self.assertEqual((pts[4].x_mm, pts[4].y_mm), (0.0, 0.0))        # home
 
     def test_home_off_centre(self):
         # Home click is a separate labelled point at user-supplied robot mm.
         pts = build_square_calibration_points(
-            tl_uv=(0, 0), tr_uv=(100, 0), bl_uv=(0, 100), br_uv=(100, 100),
+            mxmy_uv=(0, 100), mxpy_uv=(0, 0),
+            pxmy_uv=(100, 100), pxpy_uv=(100, 0),
             home_uv=(70, 55),
             side_mm=200.0, home_x_mm=40.0, home_y_mm=-15.0,
         )
         self.assertEqual((pts[4].x_mm, pts[4].y_mm), (40.0, -15.0))
         # Corners remain anchored to robot origin regardless of where home is.
-        self.assertEqual((pts[0].x_mm, pts[0].y_mm), (-100.0, 100.0))
+        self.assertEqual((pts[0].x_mm, pts[0].y_mm), (-100.0, -100.0))
 
     def test_invalid_side_raises(self):
         with self.assertRaises(ValueError):
             build_square_calibration_points(
-                tl_uv=(0, 0), tr_uv=(0, 0), bl_uv=(0, 0), br_uv=(0, 0),
+                mxmy_uv=(0, 0), mxpy_uv=(0, 0), pxmy_uv=(0, 0), pxpy_uv=(0, 0),
                 home_uv=(0, 0),
                 side_mm=0.0, home_x_mm=0.0, home_y_mm=0.0,
             )
@@ -592,34 +593,37 @@ class SixClickEndToEndTests(unittest.TestCase):
         # Pretend the camera maps the work plane affinely:
         #     u = 320 + 0.8 * X_mm
         #     v = 240 - 0.8 * Y_mm     (image-y grows DOWN, robot-y grows UP)
+        # Hidden corner in the new convention is (+X, +Y).
         side = 200.0
         half = side / 2.0
         def to_pixel(x, y):
             return (320.0 + 0.8 * x, 240.0 - 0.8 * y)
 
-        tl_uv = to_pixel(-half, +half)
-        tr_uv = to_pixel(+half, +half)
-        bl_uv = to_pixel(-half, -half)
-        br_uv = to_pixel(+half, -half)
+        mxmy_uv = to_pixel(-half, -half)
+        mxpy_uv = to_pixel(-half, +half)
+        pxmy_uv = to_pixel(+half, -half)
+        pxpy_uv = to_pixel(+half, +half)        # hidden corner
         home_uv = to_pixel(0.0, 0.0)
 
-        # Infer BR from helpers (drop a helper on each edge that DOESN'T touch BR)
-        # right edge: TR -> BR. Helper at midpoint.
-        aux_right = (
-            (tr_uv[0] + br_uv[0]) / 2.0,
-            (tr_uv[1] + br_uv[1]) / 2.0,
+        # +X edge helper: collinear with pxmy and the hidden pxpy (midpoint).
+        helper_px_edge = (
+            (pxmy_uv[0] + pxpy_uv[0]) / 2.0,
+            (pxmy_uv[1] + pxpy_uv[1]) / 2.0,
         )
-        # bottom edge: BL -> BR. Helper at midpoint.
-        aux_bottom = (
-            (bl_uv[0] + br_uv[0]) / 2.0,
-            (bl_uv[1] + br_uv[1]) / 2.0,
+        # +Y edge helper: collinear with mxpy and the hidden pxpy.
+        helper_py_edge = (
+            (mxpy_uv[0] + pxpy_uv[0]) / 2.0,
+            (mxpy_uv[1] + pxpy_uv[1]) / 2.0,
         )
-        inferred_br = infer_hidden_br_corner(tr_uv, bl_uv, aux_right, aux_bottom)
-        self.assertAlmostEqual(inferred_br[0], br_uv[0], places=4)
-        self.assertAlmostEqual(inferred_br[1], br_uv[1], places=4)
+        inferred_pxpy = infer_hidden_corner(
+            corner_a_uv=pxmy_uv, helper_a_uv=helper_px_edge,
+            corner_b_uv=mxpy_uv, helper_b_uv=helper_py_edge,
+        )
+        self.assertAlmostEqual(inferred_pxpy[0], pxpy_uv[0], places=4)
+        self.assertAlmostEqual(inferred_pxpy[1], pxpy_uv[1], places=4)
 
         pts = build_square_calibration_points(
-            tl_uv=tl_uv, tr_uv=tr_uv, bl_uv=bl_uv, br_uv=inferred_br,
+            mxmy_uv=mxmy_uv, mxpy_uv=mxpy_uv, pxmy_uv=pxmy_uv, pxpy_uv=inferred_pxpy,
             home_uv=home_uv,
             side_mm=side, home_x_mm=0.0, home_y_mm=0.0,
         )
