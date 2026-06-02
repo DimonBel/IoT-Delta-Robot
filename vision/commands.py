@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Sequence
 
-from vision.calibration import Calibrator, detection_center, refined_detection_center
+from vision.calibration import Calibrator, HomographyFit, detection_center, refined_detection_center
 from vision.quality import grade_detection
 from vision.snapshot_inspection import SnapshotProduceInspector
 from vision.tracker import FruitTracker
@@ -171,7 +171,7 @@ def run_live_vision(
             return False
         cal = calibrator.calibration
         print(
-            f"Loaded calibration: poly{cal.fit.degree}, "
+            f"Loaded calibration: {'homography' if isinstance(cal.fit, HomographyFit) else 'poly' + str(cal.fit.degree)}, "
             f"image {cal.image_size[0]}x{cal.image_size[1]}, "
             f"RMS {cal.fit.rms_residual_mm:.2f} mm"
         )

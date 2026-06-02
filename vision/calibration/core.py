@@ -109,9 +109,61 @@ class PolyFit:
 
 
 @dataclass
+class HomographyFit:
+    """Perspective (projective) transform: pixel (u,v) → robot mm (X,Y).
+
+    Mathematically exact for a flat work surface at fixed Z.  Encodes the
+    full camera-projection model including the perspective-division term
+    (h31·u + h32·v + 1) that affine / polynomial models lack entirely.
+
+    H maps homogeneous pixel coordinates to homogeneous robot coordinates:
+        λ [X, Y, 1]ᵀ = H · [u, v, 1]ᵀ
+        X = (h00·u + h01·v + h02) / (h20·u + h21·v + h22)
+        Y = (h10·u + h11·v + h12) / (h20·u + h21·v + h22)
+    """
+
+    H: np.ndarray           # shape (3, 3), float64
+    rms_residual_mm: float
+
+    def apply(self, u: float, v: float) -> tuple[float, float]:
+        p = self.H @ np.array([u, v, 1.0], dtype=float)
+        w = float(p[2])
+        if abs(w) < 1e-12:
+            raise ValueError(
+                f"Degenerate homography at pixel ({u:.1f}, {v:.1f}): "
+                "perspective denominator w≈0. Recalibrate."
+            )
+        return float(p[0] / w), float(p[1] / w)
+
+    def to_dict(self) -> dict:
+        return {
+            "type": "homography",
+            "H": self.H.tolist(),
+            "rms_residual_mm": self.rms_residual_mm,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "HomographyFit":
+        H = np.asarray(d["H"], dtype=float)
+        if H.shape != (3, 3):
+            raise ValueError(
+                f"Homography matrix must be 3×3, got shape {H.shape}"
+            )
+        return cls(H=H, rms_residual_mm=float(d["rms_residual_mm"]))
+
+
+def _load_fit(d: dict) -> "PolyFit | HomographyFit":
+    """Dispatch on fit type stored in the JSON blob."""
+    t = d.get("type", "poly1")
+    if t == "homography":
+        return HomographyFit.from_dict(d)
+    return PolyFit.from_dict(d)
+
+
+@dataclass
 class Calibration:
     image_size: tuple[int, int]                              # (W, H)
-    fit: PolyFit
+    fit: PolyFit | HomographyFit
     points: list[CalibrationPoint]
     work_zone: WorkZone                                       # safe rect from markers + margin + hw limits
     robot_home_mm: tuple[float, float] = (0.0, 0.0)           # centre marker sits here in robot mm
@@ -156,7 +208,7 @@ class Calibration:
             raise ValueError(
                 f"Calibration schema v{version} found; this build expects "
                 f"v{SCHEMA_VERSION}. Please re-run "
-                f"`python -m vision.calibration.ui --live --side 980` "
+                f"`python -m vision.calibration.ui --live` "
                 f"to regenerate the JSON."
             )
         size = d["image_size"]
@@ -177,7 +229,7 @@ class Calibration:
         )
         return cls(
             image_size=(int(size[0]), int(size[1])),
-            fit=PolyFit.from_dict(d["fit"]),
+            fit=_load_fit(d["fit"]),
             points=points,
             work_zone=zone,
             robot_home_mm=home,
@@ -258,6 +310,95 @@ def auto_select_degree(n_points: int) -> int:
     if n_points >= 16:
         return 3
     return 2
+
+
+# ----- homography fit (Direct Linear Transform) -----
+
+def _normalize_pts(pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Hartley normalization: translate centroid to origin, scale so that the
+    mean distance of all points from the origin equals sqrt(2).
+
+    Returns (normalized_points, 3×3 normalization matrix T) such that
+        T @ [x, y, 1]ᵀ = [x_n, y_n, 1]ᵀ
+    """
+    c = pts.mean(axis=0)
+    dists = np.sqrt(((pts - c) ** 2).sum(axis=1))
+    d_mean = float(dists.mean())
+    s = math.sqrt(2.0) / d_mean if d_mean > 1e-12 else 1.0
+    T = np.array([
+        [s,  0., -s * c[0]],
+        [0., s,  -s * c[1]],
+        [0., 0.,  1.       ],
+    ], dtype=float)
+    n = len(pts)
+    pts_h = np.column_stack([pts, np.ones(n)])
+    pts_n = (T @ pts_h.T).T[:, :2]
+    return pts_n, T
+
+
+def _dlt_homography(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
+    """Direct Linear Transform with Hartley normalization.
+
+    src : N×2 float — pixel coordinates (u, v)
+    dst : N×2 float — robot mm coordinates (X, Y)
+
+    Returns 3×3 homography H such that  H @ [u,v,1]ᵀ ≈ λ·[X,Y,1]ᵀ.
+    For N=4 the result is exact; for N>4 it is least-squares optimal.
+    """
+    src_n, T_src = _normalize_pts(src)
+    dst_n, T_dst = _normalize_pts(dst)
+
+    n = len(src_n)
+    A = np.zeros((2 * n, 8), dtype=float)
+    b = np.zeros(2 * n, dtype=float)
+    for i, ((u, v), (x, y)) in enumerate(zip(src_n, dst_n)):
+        A[2 * i]     = [u, v, 1., 0., 0., 0., -u * x, -v * x]
+        b[2 * i]     = x
+        A[2 * i + 1] = [0., 0., 0., u, v, 1., -u * y, -v * y]
+        b[2 * i + 1] = y
+
+    h, *_ = np.linalg.lstsq(A, b, rcond=None)
+    H_n = np.array([
+        [h[0], h[1], h[2]],
+        [h[3], h[4], h[5]],
+        [h[6], h[7], 1.  ],
+    ], dtype=float)
+    # Denormalize: H = T_dst⁻¹ @ H_n @ T_src
+    H = np.linalg.inv(T_dst) @ H_n @ T_src
+    H /= H[2, 2]   # fix scale so H[2,2] == 1
+    return H
+
+
+def fit_homography(points: Sequence[CalibrationPoint]) -> HomographyFit:
+    """Compute perspective homography H: pixel (u,v) → robot mm (X,Y).
+
+    Uses the Direct Linear Transform with Hartley normalization.
+    Requires ≥4 non-collinear calibration points.
+    For exactly 4 points the solution is exact (zero residual);
+    for N>4 it is the least-squares optimum over all N correspondences.
+
+    This is the mathematically correct model for a camera looking at a flat
+    horizontal work surface — it handles oblique camera angles, perspective
+    foreshortening, and camera offsets exactly, unlike polynomial fits.
+    """
+    n = len(points)
+    if n < 4:
+        raise ValueError(
+            f"Homography requires at least 4 non-collinear points, got {n}."
+        )
+    src = np.array([[p.u, p.v] for p in points], dtype=float)
+    dst = np.array([[p.x_mm, p.y_mm] for p in points], dtype=float)
+    H = _dlt_homography(src, dst)
+
+    # Vectorised RMS: apply H to all src points at once
+    src_h = np.column_stack([src, np.ones(n)])   # N×3
+    pred_h = (H @ src_h.T).T                      # N×3
+    w = pred_h[:, 2:3]
+    pred_xy = pred_h[:, :2] / w                   # N×2, perspective-divided
+    err_sq = ((pred_xy - dst) ** 2).sum(axis=1)
+    rms = float(math.sqrt(float(err_sq.mean())))
+
+    return HomographyFit(H=H, rms_residual_mm=rms)
 
 
 # ----- work zone -----

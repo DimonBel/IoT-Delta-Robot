@@ -16,6 +16,7 @@ import numpy as np
 from .core import (
     Calibration,
     CalibrationPoint,
+    HomographyFit,
     PolyFit,
     fit_polynomial,
 )
@@ -92,14 +93,16 @@ def draw_result_image(
     strip_h = 58
     cv2.rectangle(overlay, (0, h_img - strip_h), (w_img, h_img), (30, 30, 30), -1)
     home = calibration.robot_home_mm
+    fit = calibration.fit
+    fit_label = "homography" if isinstance(fit, HomographyFit) else f"poly{fit.degree}"
     line1 = (
-        f"Fit: poly{calibration.fit.degree}   "
-        f"RMS residual = {calibration.fit.rms_residual_mm:.2f} mm   "
+        f"Fit: {fit_label}   "
+        f"RMS residual = {fit.rms_residual_mm:.2f} mm   "
         f"N points = {len(calibration.points)}   "
         f"Home=({home[0]:.0f}, {home[1]:.0f}) mm   "
         f"Pick Z = {calibration.pick_height_z_mm:.0f} mm"
     )
-    line2 = "Pink = calibrated square   Red dots = clicked markers (incl. home)"
+    line2 = "Pink = calibrated zone   Red dots = clicked markers"
     cv2.putText(overlay, line1, (10, h_img - strip_h + 22),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
     cv2.putText(overlay, line2, (10, h_img - strip_h + 45),

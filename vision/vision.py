@@ -728,12 +728,6 @@ class ZEDYoloVisionPipeline(ZEDCoordinateVisionPipeline):
             pts = self._board_quad_corners.reshape(-1, 1, 2).astype(int)
             self._cv2.polylines(overlay, [pts], isClosed=True, color=(0, 255, 255), thickness=2)
 
-        # Draw the calibrated work-zone polygon (cyan) so the operator can see
-        # the area where pickable detections are accepted.
-        if self._calib_polygon_xy is not None and self._np is not None:
-            poly = self._calib_polygon_xy.reshape(-1, 1, 2).astype(int)
-            self._cv2.polylines(overlay, [poly], isClosed=True, color=(255, 255, 0), thickness=2)
-
         return overlay
 
     def _sync_board_state(self, detections):

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from .core import HomographyFit
 from .runtime import Calibrator
 
 
@@ -26,7 +27,8 @@ def _print_summary(cal: Calibrator) -> None:
     print(f"calibration: {c.notes or '(no notes)'}")
     print(f"  created_at      : {c.created_at}")
     print(f"  image_size      : {c.image_size[0]} x {c.image_size[1]}")
-    print(f"  fit             : poly{c.fit.degree}  RMS {c.fit.rms_residual_mm:.2f} mm")
+    fit_label = "homography" if isinstance(c.fit, HomographyFit) else f"poly{c.fit.degree}"
+    print(f"  fit             : {fit_label}  RMS {c.fit.rms_residual_mm:.2f} mm")
     print(f"  N points        : {len(c.points)}")
     print(
         f"  work zone (mm)  : X[{z.x_min:.0f}, {z.x_max:.0f}]  "
