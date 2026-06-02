@@ -1,7 +1,5 @@
 from __future__ import annotations
-
 from pathlib import Path
-
 from flask import Flask, jsonify, request
 
 from robot_controller import RobotController
@@ -11,6 +9,8 @@ templates_dir = Path(__file__).parent
 app = Flask(__name__)
 rc: RobotController | None = None
 
+PORT = "COM6" # windows
+# PORT = "/dev/cu.usbmodem153408901" # macos
 
 @app.get("/")
 def index():
@@ -75,7 +75,7 @@ def home():
 
 def main() -> None:
     global rc
-    with RobotController(port="/dev/cu.usbmodem153408901") as controller:
+    with RobotController(port=PORT) as controller:
         rc = controller
         rc.set_motion(speed=50, acceleration=500)
         is_delta = rc.is_delta()
