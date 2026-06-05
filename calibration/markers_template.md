@@ -54,14 +54,14 @@ The simplest workflow:
 3. Run the UI:
 
    ```
-   python -m vision.calibration_ui --live --grid 3x3 --spacing 100 \
+   python -m vision.calibration.ui --live --grid 3x3 --spacing 100 \
        --out calibration/calibration.json
    ```
 
    or, with a saved photo:
 
    ```
-   python -m vision.calibration_ui --image samples/top_down.jpg \
+   python -m vision.calibration.ui --image samples/top_down.jpg \
        --grid 3x3 --spacing 100 --out calibration/calibration.json
    ```
 

@@ -112,10 +112,32 @@ Run from repository root.
 - Command:
   - `python -m vision.commands snapshot --output outputs/snapshots/frame_001.jpg --model medium --confidence 40`
 
+### Capture a snapshot dataset (only frames with detected objects)
+
+- Command:
+  - `python -m vision.commands snapshot-dataset --output-dir outputs/snapshot_inspection --count 50 --max-frames 600 --model medium --confidence 35`
+- Output per sample:
+  - `<name>.jpg` (annotated frame)
+  - `<name>.json` (detections + frame metadata)
+
 ### Inspect existing still images
 
 - Command:
   - `python -m vision.commands inspect --images samples/a.jpg samples/b.jpg --model medium --confidence 35 --json-out outputs/reports/inspection.json`
+
+### Categorize objects in snapshots (good/bad/unclear/person/other_object)
+
+- Command:
+  - `python -m vision.commands categorize --images outputs/snapshot_inspection/*.jpg --model medium --confidence 35 --unclear-confidence 45 --crops-dir outputs/snapshot_inspection/crops --json-out outputs/reports/categorization.json`
+- Categories:
+  - `good`: produce likely acceptable
+  - `bad`: produce likely poor quality/spoilage
+  - `unclear`: low confidence or unknown produce kind
+  - `person`: human detection
+  - `other_object`: non-produce objects (robot, board, misc objects)
+- Behaviour:
+  - When the dataset capture wrote a `<stem>.json` sidecar next to the image, those detections (already vetted by the calibrated work-zone YOLO pass) are used. Pass `--no-sidecar` to force a fresh full-frame inference.
+  - `--crops-dir DIR` saves per-detection crops into `DIR/<category>/...jpg` for fast visual review and dataset prep.
 
 ## 3) Backward-compatible test wrappers
 
@@ -142,3 +164,62 @@ There are two coordinate outputs in the pipeline:
 
 Coordinate logic is still active in payload generation and mapping, but terminal coordinate printing is temporarily muted by default in `live` mode.  
 Use `--print-coordinates` to display them while this temporary state is in place.
+
+### 4.1 Board-frame millimetres (`board_xy_mm`)
+
+When a saved calibration is loaded (default behaviour of `live`), each detection also gets `board_xy_mm: {x, y, inside_zone}` in millimetres relative to the centre of the calibrated work area. This is independent of `board_map` (which stays in `[0..1]`) and of `position_m` (3D camera frame). See [CALIBRATION.md](../CALIBRATION.md) for the full schema, the `--no-calibration` escape hatch, and how the resolution-mismatch error surfaces. Robot integration consumes this field — that part is intentionally not wired in this PR.
+
+The pixel that gets transformed into `board_xy_mm` is also exposed for debugging:
+
+- `center_uv: [u, v]` — the image pixel used as the pickup point.
+- `center_method: "circle_fit" | "bbox_center"` — how that pixel was chosen. With a top-down camera and near-spherical produce, the live loop runs an HSV-saturation + min-enclosing-circle fit on the bbox crop and uses its centre (`circle_fit`); on uniform crops, missing frames, or any cv2 failure it falls back to the bbox arithmetic mean (`bbox_center`). The `circle_fit` path keeps `board_xy_mm` close to the actual fruit centre rather than drifting toward the bbox edge.
+
+### 4.2 Live quality grading (`quality`)
+
+`live` now also runs the colleague's fuzzy mean-HSV grading from `snapshot_inspection.py` on every produce detection (composed by `vision/quality.py`). Each produce detection gets:
+
+```
+"quality": {
+  "grade": "excellent" | "good" | "fair" | "poor" | "reject",
+  "defect_score": 0.0..1.0,
+  "issues": ["low_brightness_may_indicate_decay_or_shadow", ...],
+  "memberships": {grade -> 0..1},
+  "hsv": {"mean_h", "mean_s", "mean_v"} | null
+}
+```
+
+Heads up: it's bbox-mean HSV, so a small dark patch on a bright fruit only nudges the grade — don't expect `excellent → reject` for a tiny piece of black tape. Pixel-level dark-blob detection is a future upgrade.
+
+### 4.3 Detection-range and lighting flags
+
+New `live` flags tuned for "see small fruit at distance":
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--imgsz INT` | 832 | YOLO inference size. Bigger = better small-object recall, slower. |
+| `--confidence INT` | 25 | Min YOLO conf in %. Drops produce floor; people are gated separately. |
+| `--person-min-confidence INT` | 40 | Drops weak person detections after YOLO so the overlay isn't flooded. |
+| `--enhance` | off | Apply CLAHE on the L channel before YOLO. Helps in dim lighting; ~2-5 ms cost. |
+| `--no-quality` | off | Skip the `quality` annotation if not needed. |
+
+### 4.4 Live ID tracking (`track_id`)
+
+`vision.tracker.FruitTracker` assigns each produce detection a stable integer `track_id` across frames using greedy nearest-neighbour matching in board-frame millimetres. The detection dict gains `detection["track_id"]`. The live overlay draws a cyan dot + crosshair at the (u, v) used for `board_xy_mm` and prints `#<id>` next to it — this is the visual signal that the coord lands on the fruit centre, not its edge.
+
+Two output files (in `outputs/`, gitignored):
+
+- **`outputs/latest_tracks.json`** — overwritten every `--tracker-snapshot-every` frames (default 10). Lists currently-active tracks: `track_id`, `label`, `board_xy_mm`, `quality_grade`, `hits`, `age_frames`, `first_frame`, `last_frame`, `last_seen_ts`. Suitable for a robot script that just reads "what to pick now".
+- **`outputs/track_events.jsonl`** — appended on `new` or `lost` events only (not per frame). Useful audit/replay.
+
+Flags on `live`:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--no-tracking` | off | Skip tracking entirely. |
+| `--tracker-output PATH` | `outputs/latest_tracks.json` | Snapshot path; empty string disables. |
+| `--tracker-events PATH` | `outputs/track_events.jsonl` | Events JSONL path; empty string disables. |
+| `--tracker-snapshot-every N` | 10 | Write snapshot every N frames. |
+| `--tracker-radius-mm FLOAT` | 40 | Match radius; smaller = stricter. |
+| `--tracker-max-age-frames N` | 60 | Forget tracks after N unseen frames (~2 s at 30 fps). |
+
+Matching is label-locked (an `orange` never merges with an `apple`). If a fruit moves more than `--tracker-radius-mm` between consecutive frames it gets a new ID.

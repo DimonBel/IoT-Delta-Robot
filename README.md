@@ -93,3 +93,31 @@ uvicorn main.main:app --reload
 
 **Access the web UI:**
 Open your browser and navigate to `http://localhost:8000`
+
+### Run live with calibration + quality grading
+
+The vision pipeline crops YOLO inference to a calibrated work zone and tags every produce detection with a fuzzy quality grade. End-to-end run sequence on a fresh machine:
+
+```bash
+# 1. Setup (once)
+python -m venv .venv
+.venv\Scripts\activate            # Windows; use source .venv/bin/activate elsewhere
+pip install -r requirements.txt
+# Install the ZED SDK from Stereolabs, then run their get_python_api.py.
+# Do NOT pip install pyzed.
+
+# 2. Verify install (no camera needed) — run from the project root
+python -m unittest tests.test_calibration -v
+python -m unittest tests.test_quality -v
+
+# 3. Calibrate the work zone once (redo whenever the camera moves)
+python -m vision.calibration.ui --image samples/top_down.jpg \
+    --grid 3x3 --spacing 100 --out calibration/calibration.json
+# Live variant: replace --image samples/top_down.jpg with --live
+
+# 4. Run live (zone-cropped detection + quality grading)
+python -m vision.commands live --print-coordinates
+# One-liner equivalent: python -c "from vision import live; live()"
+```
+
+Each detection emitted by the live loop now includes `board_xy_mm` (work-zone coordinates with `inside_zone` flag) and, for produce, a `quality` block (`grade`, `defect_score`, `issues`, `memberships`, `hsv`). See [CALIBRATION.md](CALIBRATION.md) for the calibration package details.

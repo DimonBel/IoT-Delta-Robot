@@ -79,8 +79,4 @@ def classify_yolo_label(label: str):
     if any(kw in normalized for kw in ROBOT_LABEL_KEYWORDS):
         return "delta_robot", canonical_kind
 
-    # General objects (COCO etc.) — keep in the live stream for situational awareness.
-    if normalized:
-        return "object", canonical_kind
-
     return "skip", None

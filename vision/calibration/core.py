@@ -1,8 +1,12 @@
 """Math + IO for the pixel -> robot table transform.
 
 Maps camera image pixel (u, v) to robot table coordinate (X_mm, Y_mm) using a
-bivariate polynomial fit over N hand-placed marker points. Z is treated as a
-fixed pick-height (configured separately).
+bivariate polynomial fit over N hand-placed marker points. The grid is
+anchored at a single `robot_home_mm` coordinate (the centre marker sits at
+that robot XY). There is no active-zone / tool-offset overlay — the master
+grid IS the calibration.
+
+Z is treated as a fixed pick-height (configured separately).
 
 Pure stdlib + numpy. The interactive click UI lives in vision.calibration.ui
 and the result-image rendering lives in vision.calibration.draw.
@@ -20,7 +24,7 @@ from typing import Iterable, Sequence
 import numpy as np
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_PICK_HEIGHT_MM = -940.0
 
 # Hardware safe limits from robot/robot_tests/POSITION.md
@@ -105,11 +109,97 @@ class PolyFit:
 
 
 @dataclass
+class HomographyFit:
+    """Perspective (projective) transform: pixel (u,v) → robot mm (X,Y).
+
+    Mathematically exact for a flat work surface at fixed Z.  Encodes the
+    full camera-projection model including the perspective-division term
+    (h31·u + h32·v + 1) that affine / polynomial models lack entirely.
+
+    H maps homogeneous pixel coordinates to homogeneous robot coordinates:
+        λ [X, Y, 1]ᵀ = H · [u, v, 1]ᵀ
+        X = (h00·u + h01·v + h02) / (h20·u + h21·v + h22)
+        Y = (h10·u + h11·v + h12) / (h20·u + h21·v + h22)
+
+    A thin-plate spline residual correction (tps_*) is layered on top to
+    drive the per-calibration-point error to zero and smoothly interpolate
+    between them.  Old calibrations without the correction still load fine.
+    """
+
+    H: np.ndarray                         # shape (3, 3), float64
+    rms_residual_mm: float                # homography-only RMS before TPS
+    tps_src: np.ndarray | None = field(default=None, repr=False)  # (N,2) pixel control pts
+    tps_wx: np.ndarray | None = field(default=None, repr=False)   # (N+3,) X-correction weights
+    tps_wy: np.ndarray | None = field(default=None, repr=False)   # (N+3,) Y-correction weights
+
+    def apply(self, u: float, v: float) -> tuple[float, float]:
+        p = self.H @ np.array([u, v, 1.0], dtype=float)
+        w = float(p[2])
+        if abs(w) < 1e-12:
+            raise ValueError(
+                f"Degenerate homography at pixel ({u:.1f}, {v:.1f}): "
+                "perspective denominator w≈0. Recalibrate."
+            )
+        x = float(p[0] / w)
+        y = float(p[1] / w)
+        if self.tps_src is not None and self.tps_wx is not None and self.tps_wy is not None:
+            q = np.array([[u, v]], dtype=float)
+            x += float(_eval_tps(self.tps_src, self.tps_wx, q)[0])
+            y += float(_eval_tps(self.tps_src, self.tps_wy, q)[0])
+        return x, y
+
+    def to_dict(self) -> dict:
+        d: dict = {
+            "type": "homography",
+            "H": self.H.tolist(),
+            "rms_residual_mm": self.rms_residual_mm,
+        }
+        if self.tps_src is not None:
+            d["tps_correction"] = {
+                "src_pixels": self.tps_src.tolist(),
+                "weights_x": self.tps_wx.tolist(),
+                "weights_y": self.tps_wy.tolist(),
+            }
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "HomographyFit":
+        H = np.asarray(d["H"], dtype=float)
+        if H.shape != (3, 3):
+            raise ValueError(
+                f"Homography matrix must be 3×3, got shape {H.shape}"
+            )
+        tps = d.get("tps_correction")
+        if tps:
+            tps_src = np.asarray(tps["src_pixels"], dtype=float)
+            tps_wx  = np.asarray(tps["weights_x"],  dtype=float)
+            tps_wy  = np.asarray(tps["weights_y"],  dtype=float)
+        else:
+            tps_src = tps_wx = tps_wy = None
+        return cls(
+            H=H,
+            rms_residual_mm=float(d["rms_residual_mm"]),
+            tps_src=tps_src,
+            tps_wx=tps_wx,
+            tps_wy=tps_wy,
+        )
+
+
+def _load_fit(d: dict) -> "PolyFit | HomographyFit":
+    """Dispatch on fit type stored in the JSON blob."""
+    t = d.get("type", "poly1")
+    if t == "homography":
+        return HomographyFit.from_dict(d)
+    return PolyFit.from_dict(d)
+
+
+@dataclass
 class Calibration:
-    image_size: tuple[int, int]  # (W, H)
-    fit: PolyFit
+    image_size: tuple[int, int]                              # (W, H)
+    fit: PolyFit | HomographyFit
     points: list[CalibrationPoint]
-    work_zone: WorkZone
+    work_zone: WorkZone                                       # safe rect from markers + margin + hw limits
+    robot_home_mm: tuple[float, float] = (0.0, 0.0)           # centre marker sits here in robot mm
     pick_height_z_mm: float = DEFAULT_PICK_HEIGHT_MM
     notes: str = ""
     created_at: str = field(
@@ -135,6 +225,10 @@ class Calibration:
                 for p in self.points
             ],
             "work_zone": self.work_zone.to_dict(),
+            "robot_home_mm": {
+                "x": float(self.robot_home_mm[0]),
+                "y": float(self.robot_home_mm[1]),
+            },
             "pick_height_z_mm": self.pick_height_z_mm,
             "created_at": self.created_at,
             "notes": self.notes,
@@ -145,8 +239,10 @@ class Calibration:
         version = d.get("schema_version", 1)
         if version != SCHEMA_VERSION:
             raise ValueError(
-                f"Unsupported calibration schema_version {version}; "
-                f"expected {SCHEMA_VERSION}"
+                f"Calibration schema v{version} found; this build expects "
+                f"v{SCHEMA_VERSION}. Please re-run "
+                f"`python -m vision.calibration.ui --live` "
+                f"to regenerate the JSON."
             )
         size = d["image_size"]
         points = [
@@ -159,11 +255,17 @@ class Calibration:
             for p in d["calibration_points"]
         ]
         zone = WorkZone(**d["work_zone"])
+        home_data = d.get("robot_home_mm") or {}
+        home = (
+            float(home_data.get("x", 0.0)),
+            float(home_data.get("y", 0.0)),
+        )
         return cls(
             image_size=(int(size[0]), int(size[1])),
-            fit=PolyFit.from_dict(d["fit"]),
+            fit=_load_fit(d["fit"]),
             points=points,
             work_zone=zone,
+            robot_home_mm=home,
             pick_height_z_mm=float(d.get("pick_height_z_mm", DEFAULT_PICK_HEIGHT_MM)),
             notes=str(d.get("notes", "")),
             created_at=str(d.get("created_at", "")),
@@ -234,9 +336,154 @@ def fit_polynomial(points: Sequence[CalibrationPoint], degree: int = 2) -> PolyF
 
 
 def auto_select_degree(n_points: int) -> int:
+    # Keep the fit solvable for small click sets:
+    #   poly1 needs 3 terms, poly2 needs 6, poly3 needs 10.
+    if n_points < 6:
+        return 1
     if n_points >= 16:
         return 3
     return 2
+
+
+# ----- Thin-Plate Spline residual correction -----
+
+def _tps_kernel(r: np.ndarray) -> np.ndarray:
+    """TPS kernel r²·log r, with the convention 0·log 0 = 0."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(r < 1e-12, 0.0, r * r * np.log(r))
+
+
+def _fit_tps(src: np.ndarray, values: np.ndarray) -> np.ndarray:
+    """Fit a 2-D thin-plate spline.
+
+    src    : (N, 2) pixel coords of control points
+    values : (N,)  scalar residuals at each control point
+    Returns (N+3,) weights [w_0..w_{N-1}, a_const, a_u, a_v].
+    """
+    n = len(src)
+    diffs = src[:, None, :] - src[None, :, :]
+    r = np.sqrt((diffs ** 2).sum(axis=2))
+    K = _tps_kernel(r)
+    P = np.column_stack([np.ones(n, dtype=float), src])
+    A = np.zeros((n + 3, n + 3), dtype=float)
+    A[:n, :n] = K
+    A[:n, n:] = P
+    A[n:, :n] = P.T
+    rhs = np.zeros(n + 3, dtype=float)
+    rhs[:n] = values
+    weights, *_ = np.linalg.lstsq(A, rhs, rcond=None)
+    return weights
+
+
+def _eval_tps(src: np.ndarray, weights: np.ndarray, query: np.ndarray) -> np.ndarray:
+    """Evaluate a fitted TPS at (M, 2) query pixels. Returns (M,) values."""
+    n = len(src)
+    w_ctrl = weights[:n]
+    a = weights[n:]
+    diffs = query[:, None, :] - src[None, :, :]
+    r = np.sqrt((diffs ** 2).sum(axis=2))
+    K = _tps_kernel(r)
+    affine = a[0] + a[1] * query[:, 0] + a[2] * query[:, 1]
+    return K @ w_ctrl + affine
+
+
+# ----- homography fit (Direct Linear Transform) -----
+
+def _normalize_pts(pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Hartley normalization: translate centroid to origin, scale so that the
+    mean distance of all points from the origin equals sqrt(2).
+
+    Returns (normalized_points, 3×3 normalization matrix T) such that
+        T @ [x, y, 1]ᵀ = [x_n, y_n, 1]ᵀ
+    """
+    c = pts.mean(axis=0)
+    dists = np.sqrt(((pts - c) ** 2).sum(axis=1))
+    d_mean = float(dists.mean())
+    s = math.sqrt(2.0) / d_mean if d_mean > 1e-12 else 1.0
+    T = np.array([
+        [s,  0., -s * c[0]],
+        [0., s,  -s * c[1]],
+        [0., 0.,  1.       ],
+    ], dtype=float)
+    n = len(pts)
+    pts_h = np.column_stack([pts, np.ones(n)])
+    pts_n = (T @ pts_h.T).T[:, :2]
+    return pts_n, T
+
+
+def _dlt_homography(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
+    """Direct Linear Transform with Hartley normalization.
+
+    src : N×2 float — pixel coordinates (u, v)
+    dst : N×2 float — robot mm coordinates (X, Y)
+
+    Returns 3×3 homography H such that  H @ [u,v,1]ᵀ ≈ λ·[X,Y,1]ᵀ.
+    For N=4 the result is exact; for N>4 it is least-squares optimal.
+    """
+    src_n, T_src = _normalize_pts(src)
+    dst_n, T_dst = _normalize_pts(dst)
+
+    n = len(src_n)
+    A = np.zeros((2 * n, 8), dtype=float)
+    b = np.zeros(2 * n, dtype=float)
+    for i, ((u, v), (x, y)) in enumerate(zip(src_n, dst_n)):
+        A[2 * i]     = [u, v, 1., 0., 0., 0., -u * x, -v * x]
+        b[2 * i]     = x
+        A[2 * i + 1] = [0., 0., 0., u, v, 1., -u * y, -v * y]
+        b[2 * i + 1] = y
+
+    h, *_ = np.linalg.lstsq(A, b, rcond=None)
+    H_n = np.array([
+        [h[0], h[1], h[2]],
+        [h[3], h[4], h[5]],
+        [h[6], h[7], 1.  ],
+    ], dtype=float)
+    # Denormalize: H = T_dst⁻¹ @ H_n @ T_src
+    H = np.linalg.inv(T_dst) @ H_n @ T_src
+    H /= H[2, 2]   # fix scale so H[2,2] == 1
+    return H
+
+
+def fit_homography(points: Sequence[CalibrationPoint], *, verbose: bool = False) -> HomographyFit:
+    """Compute perspective homography H: pixel (u,v) → robot mm (X,Y).
+
+    Uses the Direct Linear Transform with Hartley normalization, then layers
+    a thin-plate spline correction that drives the per-point residual to zero
+    and smoothly interpolates between calibration points.
+
+    rms_residual_mm reflects the homography-only error (before TPS) so you
+    can see how well the global perspective model fits the data.
+    """
+    n = len(points)
+    if n < 4:
+        raise ValueError(
+            f"Homography requires at least 4 non-collinear points, got {n}."
+        )
+    src = np.array([[p.u, p.v] for p in points], dtype=float)
+    dst = np.array([[p.x_mm, p.y_mm] for p in points], dtype=float)
+    H = _dlt_homography(src, dst)
+
+    # Homography-only predictions and residuals
+    src_h = np.column_stack([src, np.ones(n)])
+    pred_h = (H @ src_h.T).T
+    w_col = pred_h[:, 2:3]
+    pred_xy = pred_h[:, :2] / w_col
+    residuals = dst - pred_xy                         # N×2: true − predicted
+    err_sq = (residuals ** 2).sum(axis=1)
+    rms = float(math.sqrt(float(err_sq.mean())))
+
+    if verbose:
+        print(f"  Homography RMS: {rms:.2f} mm  ({n} points)")
+        for i, (pt, res, esq) in enumerate(zip(points, residuals, err_sq)):
+            print(f"    pt{i+1:02d}  pixel({pt.u:.0f},{pt.v:.0f})"
+                  f"  robot({pt.x_mm:+.1f},{pt.y_mm:+.1f})"
+                  f"  Δ({res[0]:+.1f},{res[1]:+.1f})  |err|={math.sqrt(esq):.1f} mm")
+
+    # TPS residual correction: forces zero error at all calibration points
+    tps_wx = _fit_tps(src, residuals[:, 0])
+    tps_wy = _fit_tps(src, residuals[:, 1])
+
+    return HomographyFit(H=H, rms_residual_mm=rms, tps_src=src, tps_wx=tps_wx, tps_wy=tps_wy)
 
 
 # ----- work zone -----
@@ -286,20 +533,117 @@ def load_calibration(path: str) -> Calibration:
     return Calibration.from_dict(data)
 
 
+# ----- 6-click flow: 3 visible corners + 2 edge helpers + home --------
+
+def intersect_infinite_lines_2d(
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    p3: tuple[float, float],
+    p4: tuple[float, float],
+) -> tuple[float, float]:
+    """Intersection of infinite lines (p1, p2) and (p3, p4) in image coordinates.
+
+    Raises ValueError if the lines are parallel or near-parallel.
+    """
+    x1, y1 = float(p1[0]), float(p1[1])
+    x2, y2 = float(p2[0]), float(p2[1])
+    x3, y3 = float(p3[0]), float(p3[1])
+    x4, y4 = float(p4[0]), float(p4[1])
+    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(denom) < 1e-9:
+        raise ValueError(
+            "Edge lines are parallel or degenerate in pixel space; "
+            "pick the helper points further from the corners they share an edge with."
+        )
+    px = (
+        (x1 * y2 - y1 * x2) * (x3 - x4) - (x1 - x2) * (x3 * y4 - y3 * x4)
+    ) / denom
+    py = (
+        (x1 * y2 - y1 * x2) * (y3 - y4) - (y1 - y2) * (x3 * y4 - y3 * x4)
+    ) / denom
+    return px, py
+
+
+def infer_hidden_corner(
+    corner_a_uv: tuple[float, float],
+    helper_a_uv: tuple[float, float],
+    corner_b_uv: tuple[float, float],
+    helper_b_uv: tuple[float, float],
+) -> tuple[float, float]:
+    """Infer the hidden 4th corner of a square from two known corners + two edge helpers.
+
+    The hidden corner sits at the intersection of:
+      - the line through `corner_a_uv` and `helper_a_uv` (the edge from
+        corner_a through the hidden corner)
+      - the line through `corner_b_uv` and `helper_b_uv` (the edge from
+        corner_b through the hidden corner)
+
+    The helpers don't need to be close to the hidden corner — any other
+    point along each visible edge works.
+    """
+    return intersect_infinite_lines_2d(
+        corner_a_uv, helper_a_uv, corner_b_uv, helper_b_uv,
+    )
+
+
+def build_square_calibration_points(
+    *,
+    mxmy_uv: tuple[float, float],
+    mxpy_uv: tuple[float, float],
+    pxmy_uv: tuple[float, float],
+    pxpy_uv: tuple[float, float],
+    home_uv: tuple[float, float],
+    side_mm: float,
+    home_x_mm: float,
+    home_y_mm: float,
+) -> list[CalibrationPoint]:
+    """Return the 5 (pixel, robot_mm) pairs from the 6-click flow.
+
+    Square is centred at the robot origin (0, 0), so corners are at
+    (-S/2, -S/2), (-S/2, +S/2), (+S/2, -S/2), (+S/2, +S/2). Parameter names
+    encode robot-frame coordinates:
+
+        mxmy_uv  pixel of corner at (-X, -Y)
+        mxpy_uv  pixel of corner at (-X, +Y)
+        pxmy_uv  pixel of corner at (+X, -Y)
+        pxpy_uv  pixel of corner at (+X, +Y)   (typically the inferred / hidden one)
+
+    Home is the operator-supplied robot XY of the clicked home pixel — it
+    can sit anywhere inside or near the square; it does NOT need to be the
+    centre.
+    """
+    if side_mm <= 0:
+        raise ValueError("side_mm must be positive")
+    half = side_mm / 2.0
+    return [
+        CalibrationPoint(u=float(mxmy_uv[0]), v=float(mxmy_uv[1]),
+                         x_mm=-half, y_mm=-half),
+        CalibrationPoint(u=float(mxpy_uv[0]), v=float(mxpy_uv[1]),
+                         x_mm=-half, y_mm=+half),
+        CalibrationPoint(u=float(pxmy_uv[0]), v=float(pxmy_uv[1]),
+                         x_mm=+half, y_mm=-half),
+        CalibrationPoint(u=float(pxpy_uv[0]), v=float(pxpy_uv[1]),
+                         x_mm=+half, y_mm=+half),
+        CalibrationPoint(u=float(home_uv[0]), v=float(home_uv[1]),
+                         x_mm=float(home_x_mm), y_mm=float(home_y_mm)),
+    ]
+
+
 # ----- helpers for grid generation -----
 
 def generate_grid_targets(
     rows: int,
     cols: int,
     spacing_mm: float,
-    center_x_mm: float = 0.0,
-    center_y_mm: float = 0.0,
+    home_x_mm: float = 0.0,
+    home_y_mm: float = 0.0,
 ) -> list[tuple[float, float]]:
-    """Build a list of (X_mm, Y_mm) target positions for a printed grid.
+    """Build (X_mm, Y_mm) target positions for a printed grid centred on the
+    robot home coordinate (`home_x_mm`, `home_y_mm`).
 
-    Origin (0, 0) is the centre of the grid; spacing_mm is the distance between
-    adjacent markers. Useful for the click UI to pre-fill the known coordinates
-    the operator must click."""
+    Row-major, top-left first; spacing_mm is the distance between adjacent
+    markers. The centre cell of an odd grid sits exactly on home.
+    """
     if rows < 1 or cols < 1:
         raise ValueError("rows and cols must be >= 1")
 
@@ -308,8 +652,8 @@ def generate_grid_targets(
     half_h = (rows - 1) * spacing_mm / 2.0
     for r in range(rows):
         for c in range(cols):
-            x = center_x_mm - half_w + c * spacing_mm
-            y = center_y_mm - half_h + r * spacing_mm
+            x = home_x_mm - half_w + c * spacing_mm
+            y = home_y_mm - half_h + r * spacing_mm
             targets.append((x, y))
     return targets
 
