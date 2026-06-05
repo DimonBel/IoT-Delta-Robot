@@ -18,8 +18,8 @@ function createInitialState(): AxisState {
 
 function cellCenter(row: number, col: number): { x: number; y: number } {
   return {
-    x: Math.round(col * CELL_UNITS + CELL_UNITS / 2 - HALF),
-    y: Math.round(-(row * CELL_UNITS + CELL_UNITS / 2 - HALF)),
+    x: Math.round(-(col * CELL_UNITS + CELL_UNITS / 2 - HALF)),
+    y: Math.round(row * CELL_UNITS + CELL_UNITS / 2 - HALF),
   };
 }
 
@@ -90,6 +90,8 @@ export default function GridControlPage() {
   const [target, setTarget] = useState<AxisState>(createInitialState);
   const [current, setCurrent] = useState<AxisState>(createInitialState);
   const [status, setStatus] = useState('idle');
+  const [speed, setSpeed] = useState(50);
+  const [acceleration, setAcceleration] = useState(500);
   const [selectedCell, setSelectedCell] = useState<{ row: number; col: number } | null>(null);
   const { ref: gridContainerRef, px } = useGridSize();
   const cellPx = px / CELLS;
@@ -103,6 +105,34 @@ export default function GridControlPage() {
   const handleZChange = useCallback((_: unknown, val: number | number[]) => {
     setTarget((prev) => ({ ...prev, Z: val as number }));
   }, []);
+
+  const updateMotion = useCallback(async (nextSpeed: number, nextAcceleration: number) => {
+    try {
+      await fetch('/motion', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ speed: nextSpeed, acceleration: nextAcceleration }),
+      });
+    } catch {
+      setStatus('motion update failed');
+    }
+  }, []);
+
+  useEffect(() => {
+    updateMotion(speed, acceleration);
+  }, [updateMotion]);
+
+  const handleSpeedCommit = useCallback((_: Event | React.SyntheticEvent, value: number | number[]) => {
+    const next = Array.isArray(value) ? value[0] : value;
+    setSpeed(next);
+    updateMotion(next, acceleration);
+  }, [acceleration, updateMotion]);
+
+  const handleAccelerationCommit = useCallback((_: Event | React.SyntheticEvent, value: number | number[]) => {
+    const next = Array.isArray(value) ? value[0] : value;
+    setAcceleration(next);
+    updateMotion(speed, next);
+  }, [speed, updateMotion]);
 
   const sendMove = useCallback(async () => {
     setStatus('sending...');
@@ -142,7 +172,7 @@ export default function GridControlPage() {
         });
         setCurrent(next);
         setTarget(next);
-        setSelectedCell({ row: getCellFromPos(next.Y, true), col: getCellFromPos(next.X) });
+        setSelectedCell({ row: getCellFromPos(next.Y), col: getCellFromPos(next.X, true) });
         setStatus(`position: X=${next.X} Y=${next.Y} Z=${next.Z}`);
       }
     } catch {
@@ -168,7 +198,7 @@ export default function GridControlPage() {
         });
         setCurrent(next);
         setTarget(next);
-        setSelectedCell({ row: getCellFromPos(next.Y, true), col: getCellFromPos(next.X) });
+        setSelectedCell({ row: getCellFromPos(next.Y), col: getCellFromPos(next.X, true) });
       } else {
         setCurrent(createInitialState());
         setTarget(createInitialState());
@@ -180,10 +210,10 @@ export default function GridControlPage() {
     }
   }, []);
 
-  const targetCol = getCellFromPos(target.X);
-  const targetRow = getCellFromPos(target.Y, true);
-  const currentCol = getCellFromPos(current.X);
-  const currentRow = getCellFromPos(current.Y, true);
+  const targetCol = getCellFromPos(target.X, true);
+  const targetRow = getCellFromPos(target.Y);
+  const currentCol = getCellFromPos(current.X, true);
+  const currentRow = getCellFromPos(current.Y);
 
   return (
     <Box sx={{ p: 2, pb: 3, height: 'calc(100vh - 48px)', display: 'flex', gap: 2, overflow: 'hidden' }}>
@@ -270,7 +300,7 @@ export default function GridControlPage() {
                   fontSize={8}
                   fontFamily="'JetBrains Mono', monospace"
                 >
-                  {i * CELL_UNITS - HALF}
+                  {-(i * CELL_UNITS - HALF)}
                 </text>
               ) : null,
             )}
@@ -284,7 +314,7 @@ export default function GridControlPage() {
                   fontSize={8}
                   fontFamily="'JetBrains Mono', monospace"
                 >
-                  {-(i * CELL_UNITS - HALF)}
+                  {i * CELL_UNITS - HALF}
                 </text>
               ) : null,
             )}
@@ -424,6 +454,44 @@ export default function GridControlPage() {
             step={5}
             value={target.Z}
             onChange={handleZChange}
+            sx={{ color: palette.accent }}
+          />
+        </Box>
+
+        <Box sx={{ mt: 1 }}>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: '2px' }}>
+            <Typography sx={{ fontSize: 11, color: palette.textSecondary }}>Speed (F)</Typography>
+            <Typography sx={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: palette.text }}>
+              {speed}
+            </Typography>
+          </Box>
+          <Slider
+            size="small"
+            min={50}
+            max={400}
+            step={1}
+            value={speed}
+            onChange={(_, val) => setSpeed(val as number)}
+            onChangeCommitted={handleSpeedCommit}
+            sx={{ color: palette.accent }}
+          />
+        </Box>
+
+        <Box sx={{ mt: 0.75 }}>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: '2px' }}>
+            <Typography sx={{ fontSize: 11, color: palette.textSecondary }}>Acceleration (A)</Typography>
+            <Typography sx={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: palette.text }}>
+              {acceleration}
+            </Typography>
+          </Box>
+          <Slider
+            size="small"
+            min={500}
+            max={1500}
+            step={10}
+            value={acceleration}
+            onChange={(_, val) => setAcceleration(val as number)}
+            onChangeCommitted={handleAccelerationCommit}
             sx={{ color: palette.accent }}
           />
         </Box>

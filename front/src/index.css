@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
 *, *::before, *::after {
   box-sizing: border-box;
@@ -8,9 +8,9 @@
 
 body {
   margin: 0;
-  background: #0c0e14;
-  color: #d4d8e8;
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background: radial-gradient(1200px 600px at 15% -10%, #ffffff 0%, #f4f6fb 55%, #eef2f8 100%);
+  color: #1b2433;
+  font-family: 'Space Grotesk', system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -20,14 +20,14 @@ body {
 }
 
 ::-webkit-scrollbar {
-  width: 3px;
+  width: 6px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2a3050;
-  border-radius: 2px;
+  background: #d6dce8;
+  border-radius: 6px;
 }
 
 input[type="range"]::-webkit-slider-thumb {

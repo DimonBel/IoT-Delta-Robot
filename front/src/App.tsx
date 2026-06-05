@@ -156,7 +156,7 @@ function App() {
           sx={{
             minHeight: '100vh',
             background: 'background.default',
-            fontFamily: "'DM Sans', sans-serif",
+            fontFamily: "'Space Grotesk', system-ui, sans-serif",
           }}
         >
           <AppHeader connected={false} />

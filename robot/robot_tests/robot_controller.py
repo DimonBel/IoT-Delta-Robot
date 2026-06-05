@@ -78,9 +78,9 @@ class RobotController:
 
     def set_motion(self, speed: float | None = None, acceleration: float | None = None) -> None:
         if speed is not None:
-            self._speed = speed
+            self._speed = int(round(speed))
         if acceleration is not None:
-            self._acceleration = acceleration
+            self._acceleration = int(round(acceleration))
 
     def move_to(self, X: float | None = None, Y: float | None = None, Z: float | None = None,
                 W: float | None = None, U: float | None = None, V: float | None = None) -> None:
@@ -88,21 +88,21 @@ class RobotController:
             raise CommandFailed("Error: no axes specified to move")
         parts = ["G01"]
         if self._acceleration is not None:
-            parts.append(f"A{self._acceleration}")
+            parts.append(f"A{int(self._acceleration)}")
         if self._speed is not None:
-            parts.append(f"F{self._speed}")
+            parts.append(f"F{int(self._speed)}")
         if X is not None:
-            parts.append(f"X{X}")
+            parts.append(f"X{int(round(X))}")
         if Y is not None:
-            parts.append(f"Y{Y}")
+            parts.append(f"Y{int(round(Y))}")
         if Z is not None:
-            parts.append(f"Z{Z}")
+            parts.append(f"Z{int(round(Z))}")
         if W is not None:
-            parts.append(f"W{W}")
+            parts.append(f"W{int(round(W))}")
         if U is not None:
-            parts.append(f"U{U}")
+            parts.append(f"U{int(round(U))}")
         if V is not None:
-            parts.append(f"V{V}")
+            parts.append(f"V{int(round(V))}")
         self.send_ok_command(" ".join(parts))
 
     def get_position(self) -> list[float]:

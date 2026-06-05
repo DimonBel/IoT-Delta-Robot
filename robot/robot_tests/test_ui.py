@@ -10,7 +10,7 @@ frontend_dist = project_root / "front" / "dist"
 app = Flask(__name__, static_folder=str(frontend_dist), static_url_path="")
 rc: RobotController | None = None
 
-PORT = "COM8" # windows
+PORT = "COM6" # windows
 # PORT = "/dev/cu.usbmodem153408901" # macos
 
 @app.get("/")
@@ -80,6 +80,23 @@ def home():
     values = {axis: float(values_list[index]) for index, axis in enumerate(axes)}
     print(f"home: ok ({values})", flush=True)
     return jsonify({"status": "ok", "values": values})
+
+
+@app.post("/motion")
+def motion():
+    if rc is None:
+        return jsonify({"status": "error", "error": "robot not ready"}), 503
+
+    payload = request.get_json(silent=True) or {}
+    speed = payload.get("speed")
+    acceleration = payload.get("acceleration")
+
+    rc.set_motion(
+        speed=float(speed) if speed is not None else None,
+        acceleration=float(acceleration) if acceleration is not None else None,
+    )
+
+    return jsonify({"status": "ok", "speed": speed, "acceleration": acceleration})
 
 
 def main() -> None:

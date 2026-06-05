@@ -1,39 +1,39 @@
 import { createTheme } from '@mui/material/styles';
 
 const palette = {
-  bg: '#0c0e14',
-  surface: '#141722',
-  surfaceHover: '#1a1e2e',
-  surfaceBorder: '#1f2437',
-  border: '#2a3050',
-  text: '#d4d8e8',
-  textSecondary: '#6b7394',
-  textMuted: '#3e4563',
-  success: '#22c55e',
-  successDim: '#16a34a',
-  successBg: 'rgba(34,197,94,0.08)',
-  error: '#ef4444',
-  errorDim: '#dc2626',
-  errorBg: 'rgba(239,68,68,0.08)',
-  warning: '#f59e0b',
-  warningDim: '#d97706',
-  warningBg: 'rgba(245,158,11,0.08)',
-  info: '#3b82f6',
-  infoBg: 'rgba(59,130,246,0.08)',
-  apple: '#ef4444',
-  orange: '#f97316',
-  veggie: '#22c55e',
-  accent: '#3b82f6',
+  bg: '#f4f6fb',
+  surface: '#ffffff',
+  surfaceHover: '#f1f4fb',
+  surfaceBorder: '#e4e8f1',
+  border: '#d6dce8',
+  text: '#1b2433',
+  textSecondary: '#4f5b70',
+  textMuted: '#7d889d',
+  success: '#1f8f5f',
+  successDim: '#197348',
+  successBg: 'rgba(31,143,95,0.12)',
+  error: '#c43d3d',
+  errorDim: '#a93333',
+  errorBg: 'rgba(196,61,61,0.12)',
+  warning: '#b56a1a',
+  warningDim: '#935616',
+  warningBg: 'rgba(181,106,26,0.12)',
+  info: '#2a6df4',
+  infoBg: 'rgba(42,109,244,0.12)',
+  apple: '#e24a4a',
+  orange: '#d97321',
+  veggie: '#1f8f5f',
+  accent: '#2a6df4',
 };
 
 const theme = createTheme({
   palette: {
-    mode: 'dark',
-    primary: { main: '#3b82f6', dark: '#2563eb' },
-    secondary: { main: '#6b7394' },
-    error: { main: '#ef4444' },
-    warning: { main: '#f59e0b' },
-    success: { main: '#22c55e' },
+    mode: 'light',
+    primary: { main: palette.accent, dark: '#1f5ad0' },
+    secondary: { main: palette.textSecondary },
+    error: { main: palette.error },
+    warning: { main: palette.warning },
+    success: { main: palette.success },
     background: {
       default: palette.bg,
       paper: palette.surface,
@@ -46,7 +46,7 @@ const theme = createTheme({
     divider: palette.surfaceBorder,
   },
   typography: {
-    fontFamily: "'Inter', system-ui, -apple-system, sans-serif",
+    fontFamily: "'Space Grotesk', system-ui, -apple-system, sans-serif",
     h6: {
       fontWeight: 600,
       fontSize: '0.8125rem',
@@ -61,7 +61,7 @@ const theme = createTheme({
       color: palette.textSecondary,
     },
     caption: {
-      fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', monospace",
+      fontFamily: "'IBM Plex Mono', 'Fira Code', 'SF Mono', monospace",
       fontSize: '0.6875rem',
       color: palette.textSecondary,
     },
@@ -94,8 +94,8 @@ const theme = createTheme({
     MuiButton: {
       styleOverrides: {
         root: {
-          borderRadius: 4,
-          fontWeight: 500,
+          borderRadius: 6,
+          fontWeight: 600,
           textTransform: 'none',
           fontSize: '0.8125rem',
         },
@@ -107,7 +107,7 @@ const theme = createTheme({
           borderColor: palette.border,
           '&:hover': {
             borderColor: palette.textSecondary,
-            backgroundColor: palette.surfaceHover,
+            backgroundColor: '#f5f7fc',
           },
         },
       },
@@ -115,7 +115,7 @@ const theme = createTheme({
     MuiPaper: {
       styleOverrides: {
         root: {
-          borderRadius: 6,
+          borderRadius: 8,
           border: `1px solid ${palette.surfaceBorder}`,
           backgroundImage: 'none',
           backgroundColor: palette.surface,
