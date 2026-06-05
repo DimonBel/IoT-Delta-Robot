@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="UTF-8" />
+  <title>Delta Robot Movement Test</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 24px;
+    }
+
+    table {
+      border-collapse: collapse;
+      margin-top: 12px;
+    }
+
+    th,
+    td {
+      border: 1px solid #ddd;
+      padding: 8px 10px;
+      text-align: center;
+    }
+
+    .axis-name {
+      font-weight: bold;
+      width: 40px;
+    }
+
+    .axis-value {
+      min-width: 90px;
+      font-family: monospace;
+    }
+
+    .controls button {
+      margin: 2px;
+      padding: 4px 8px;
+    }
+
+    #send {
+      margin-top: 16px;
+      padding: 8px 14px;
+    }
+
+    #status {
+      margin-top: 12px;
+      font-family: monospace;
+      color: #555;
+    }
+  </style>
+</head>
+
+<body>
+  <h2>Delta Robot Movement Test</h2>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Axis</th>
+        <th>Position</th>
+        <th>Adjust</th>
+      </tr>
+    </thead>
+    <tbody id="axis-rows"></tbody>
+  </table>
+
+  <div class="controls" style="margin-top: 12px;">
+    <button id="is-delta">IsDelta</button>
+    <button id="get-position">Get Position</button>
+    <button id="home">Home</button>
+  </div>
+
+  <button id="send">Send Move</button>
+  <div id="status">idle</div>
+
+  <script>
+    const axes = ["X", "Y", "Z", "U", "V", "W"];
+    const state = {
+      X: 0,
+      Y: 0,
+      Z: 0,
+      U: 0,
+      V: 0,
+      W: 0,
+    };
+
+    function renderRows() {
+      const tbody = document.getElementById("axis-rows");
+      tbody.innerHTML = "";
+
+      axes.forEach((axis) => {
+        const row = document.createElement("tr");
+
+        const nameCell = document.createElement("td");
+        nameCell.className = "axis-name";
+        nameCell.textContent = axis;
+
+        const valueCell = document.createElement("td");
+        valueCell.className = "axis-value";
+        valueCell.id = `value-${axis}`;
+        valueCell.textContent = state[axis].toFixed(2);
+
+        const controls = document.createElement("td");
+        controls.className = "controls";
+
+        [-10, -5, -1, 1, 5, 10].forEach((delta) => {
+          const button = document.createElement("button");
+          button.textContent = delta > 0 ? `+${delta}` : `${delta}`;
+          button.addEventListener("click", () => adjust(axis, delta));
+          controls.appendChild(button);
+        });
+
+        row.appendChild(nameCell);
+        row.appendChild(valueCell);
+        row.appendChild(controls);
+        tbody.appendChild(row);
+      });
+    }
+
+    function adjust(axis, delta) {
+      state[axis] += delta;
+      const valueCell = document.getElementById(`value-${axis}`);
+      if (valueCell) {
+        valueCell.textContent = state[axis].toFixed(2);
+      }
+    }
+
+    async function sendMove() {
+      const status = document.getElementById("status");
+      status.textContent = "sending...";
+
+      const response = await fetch("/move", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(state),
+      });
+
+      if (!response.ok) {
+        status.textContent = "send failed";
+        return;
+      }
+
+      const data = await response.json();
+      status.textContent = `sent: ${JSON.stringify(data.values)}`;
+    }
+
+    async function callIsDelta() {
+      const status = document.getElementById("status");
+      status.textContent = "checking is_delta...";
+
+      const response = await fetch("/is_delta", { method: "POST" });
+      if (!response.ok) {
+        status.textContent = "is_delta failed";
+        return;
+      }
+
+      const data = await response.json();
+      status.textContent = `is_delta: ${data.is_delta}`;
+    }
+
+    async function getPosition() {
+      const status = document.getElementById("status");
+      status.textContent = "reading position...";
+
+      const response = await fetch("/position", { method: "GET" });
+      if (!response.ok) {
+        status.textContent = "position failed";
+        return;
+      }
+
+      const data = await response.json();
+      axes.forEach((axis) => {
+        if (data.values && Object.prototype.hasOwnProperty.call(data.values, axis)) {
+          state[axis] = Number(data.values[axis]);
+        }
+      });
+
+      renderRows();
+      status.textContent = `position: ${JSON.stringify(data.values)}`;
+    }
+
+    async function homeAxes() {
+      const status = document.getElementById("status");
+      status.textContent = "homing...";
+
+      const response = await fetch("/home", { method: "POST" });
+      if (!response.ok) {
+        status.textContent = "home failed";
+        return;
+      }
+
+      const data = await response.json();
+      status.textContent = `home: ${data.status}`;
+    }
+
+    document.getElementById("send").addEventListener("click", sendMove);
+    document.getElementById("is-delta").addEventListener("click", callIsDelta);
+    document.getElementById("get-position").addEventListener("click", getPosition);
+    document.getElementById("home").addEventListener("click", homeAxes);
+    renderRows();
+  </script>
+</body>
+
+</html>

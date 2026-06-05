@@ -10,7 +10,7 @@ class CommandFailed(RuntimeError):
 
 
 class RobotController:
-    def __init__(self, port: str = "COM6", baudrate: int = 115200, timeout: float = 10.0):
+    def __init__(self, port: str = "COM6", baudrate: int = 115200, timeout: float = 25.0):
         self._ser = serial.Serial(port=port, baudrate=baudrate, timeout=timeout)
         self._acceleration: float | None = None
         self._speed: float | None = None
