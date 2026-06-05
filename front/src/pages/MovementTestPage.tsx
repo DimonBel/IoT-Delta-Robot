@@ -79,6 +79,17 @@ export default function MovementTestPage() {
       const response = await fetch('/home', { method: 'POST' });
       if (!response.ok) { setStatus('home failed'); return; }
       const data = await response.json();
+      if (data.values) {
+        setState((prev) => {
+          const next = { ...prev };
+          AXES.forEach((axis) => {
+            if (Object.prototype.hasOwnProperty.call(data.values, axis)) {
+              next[axis] = Number(data.values[axis]);
+            }
+          });
+          return next;
+        });
+      }
       setStatus(`home: ${data.status}`);
     } catch { setStatus('home failed'); }
   }, []);

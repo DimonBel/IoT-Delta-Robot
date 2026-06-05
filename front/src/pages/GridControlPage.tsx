@@ -159,9 +159,21 @@ export default function GridControlPage() {
         return;
       }
       const data = await response.json();
-      setCurrent(createInitialState());
-      setTarget(createInitialState());
-      setSelectedCell(null);
+      if (data.values) {
+        const next = { ...createInitialState() };
+        AXES.forEach((axis) => {
+          if (Object.prototype.hasOwnProperty.call(data.values, axis)) {
+            next[axis] = Number(data.values[axis]);
+          }
+        });
+        setCurrent(next);
+        setTarget(next);
+        setSelectedCell({ row: getCellFromPos(next.Y, true), col: getCellFromPos(next.X) });
+      } else {
+        setCurrent(createInitialState());
+        setTarget(createInitialState());
+        setSelectedCell(null);
+      }
       setStatus(`home: ${data.status}`);
     } catch {
       setStatus('home failed');
@@ -407,8 +419,8 @@ export default function GridControlPage() {
           </Box>
           <Slider
             size="small"
-            min={0}
-            max={400}
+            min={-960}
+            max={-740}
             step={5}
             value={target.Z}
             onChange={handleZChange}

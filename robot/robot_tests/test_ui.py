@@ -27,8 +27,9 @@ def static_files(path: str):
 def move():
     payload = request.get_json(silent=True) or {}
     axes = ["X", "Y", "Z", "U", "V", "W"]
-    values = {axis: float(payload.get(axis, 0)) for axis in axes}
-    move_args = ", ".join(f"{axis}={values[axis]:.2f}" for axis in axes)
+    raw_values = {axis: float(payload.get(axis, 0)) for axis in axes}
+    values = {axis: int(round(raw_values[axis])) for axis in axes}
+    move_args = ", ".join(f"{axis}={values[axis]:.0f}" for axis in axes)
     if rc is None:
         return jsonify({"status": "error", "error": "robot not ready"}), 503
 
@@ -74,8 +75,11 @@ def home():
         return jsonify({"status": "error", "error": "robot not ready"}), 503
 
     rc.send_axes_home(X=True, Y=True, Z=True, U=True, V=True, W=True)
-    print("home: ok", flush=True)
-    return jsonify({"status": "ok"})
+    values_list = rc.get_position()
+    axes = ["X", "Y", "Z", "U", "V", "W"]
+    values = {axis: float(values_list[index]) for index, axis in enumerate(axes)}
+    print(f"home: ok ({values})", flush=True)
+    return jsonify({"status": "ok", "values": values})
 
 
 def main() -> None:
