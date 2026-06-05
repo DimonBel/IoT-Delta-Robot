@@ -12,6 +12,9 @@ class CommandFailed(RuntimeError):
 class RobotController:
     def __init__(self, port: str = "COM6", baudrate: int = 115200, timeout: float = 25.0):
         self._ser = serial.Serial(port=port, baudrate=baudrate, timeout=timeout)
+        time.sleep(2.0)
+        self._ser.reset_input_buffer()
+        self._ser.reset_output_buffer()
         self._acceleration: float | None = None
         self._speed: float | None = None
         print("Robot controller initialised.")
@@ -37,10 +40,15 @@ class RobotController:
         self._ser.flush()
 
         response = self._read_response()
+        print(f"Received: {response}")
         if not response:
             raise CommandFailed("No Response")
         if success_predicate is not None and not success_predicate(response):
             raise CommandFailed(f"Unexpected Response: {response}")
+        if self._ser.in_waiting:
+            extra = self._read_response()
+            if extra:
+                print(f"Received: {extra}")
         time.sleep(POST_COMMAND_SLEEP_SECONDS)
         return response
 

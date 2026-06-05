@@ -1,20 +1,26 @@
 from __future__ import annotations
 from pathlib import Path
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 
 from robot_controller import RobotController
 
 
-templates_dir = Path(__file__).parent
-app = Flask(__name__)
+project_root = Path(__file__).resolve().parents[2]
+frontend_dist = project_root / "front" / "dist"
+app = Flask(__name__, static_folder=str(frontend_dist), static_url_path="")
 rc: RobotController | None = None
 
-PORT = "COM6" # windows
+PORT = "COM8" # windows
 # PORT = "/dev/cu.usbmodem153408901" # macos
 
 @app.get("/")
 def index():
-    return (templates_dir / "index.html").read_text(encoding="utf-8")
+    return send_from_directory(frontend_dist, "index.html")
+
+
+@app.get("/<path:path>")
+def static_files(path: str):
+    return send_from_directory(frontend_dist, path)
 
 
 @app.post("/move")
@@ -22,7 +28,6 @@ def move():
     payload = request.get_json(silent=True) or {}
     axes = ["X", "Y", "Z", "U", "V", "W"]
     values = {axis: float(payload.get(axis, 0)) for axis in axes}
-    values = {axis: int(round(value)) for axis, value in values.items()}
     move_args = ", ".join(f"{axis}={values[axis]:.2f}" for axis in axes)
     if rc is None:
         return jsonify({"status": "error", "error": "robot not ready"}), 503
