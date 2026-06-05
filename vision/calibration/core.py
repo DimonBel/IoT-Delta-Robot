@@ -120,10 +120,17 @@ class HomographyFit:
         λ [X, Y, 1]ᵀ = H · [u, v, 1]ᵀ
         X = (h00·u + h01·v + h02) / (h20·u + h21·v + h22)
         Y = (h10·u + h11·v + h12) / (h20·u + h21·v + h22)
+
+    A thin-plate spline residual correction (tps_*) is layered on top to
+    drive the per-calibration-point error to zero and smoothly interpolate
+    between them.  Old calibrations without the correction still load fine.
     """
 
-    H: np.ndarray           # shape (3, 3), float64
-    rms_residual_mm: float
+    H: np.ndarray                         # shape (3, 3), float64
+    rms_residual_mm: float                # homography-only RMS before TPS
+    tps_src: np.ndarray | None = field(default=None, repr=False)  # (N,2) pixel control pts
+    tps_wx: np.ndarray | None = field(default=None, repr=False)   # (N+3,) X-correction weights
+    tps_wy: np.ndarray | None = field(default=None, repr=False)   # (N+3,) Y-correction weights
 
     def apply(self, u: float, v: float) -> tuple[float, float]:
         p = self.H @ np.array([u, v, 1.0], dtype=float)
@@ -133,14 +140,27 @@ class HomographyFit:
                 f"Degenerate homography at pixel ({u:.1f}, {v:.1f}): "
                 "perspective denominator w≈0. Recalibrate."
             )
-        return float(p[0] / w), float(p[1] / w)
+        x = float(p[0] / w)
+        y = float(p[1] / w)
+        if self.tps_src is not None and self.tps_wx is not None and self.tps_wy is not None:
+            q = np.array([[u, v]], dtype=float)
+            x += float(_eval_tps(self.tps_src, self.tps_wx, q)[0])
+            y += float(_eval_tps(self.tps_src, self.tps_wy, q)[0])
+        return x, y
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             "type": "homography",
             "H": self.H.tolist(),
             "rms_residual_mm": self.rms_residual_mm,
         }
+        if self.tps_src is not None:
+            d["tps_correction"] = {
+                "src_pixels": self.tps_src.tolist(),
+                "weights_x": self.tps_wx.tolist(),
+                "weights_y": self.tps_wy.tolist(),
+            }
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "HomographyFit":
@@ -149,7 +169,20 @@ class HomographyFit:
             raise ValueError(
                 f"Homography matrix must be 3×3, got shape {H.shape}"
             )
-        return cls(H=H, rms_residual_mm=float(d["rms_residual_mm"]))
+        tps = d.get("tps_correction")
+        if tps:
+            tps_src = np.asarray(tps["src_pixels"], dtype=float)
+            tps_wx  = np.asarray(tps["weights_x"],  dtype=float)
+            tps_wy  = np.asarray(tps["weights_y"],  dtype=float)
+        else:
+            tps_src = tps_wx = tps_wy = None
+        return cls(
+            H=H,
+            rms_residual_mm=float(d["rms_residual_mm"]),
+            tps_src=tps_src,
+            tps_wx=tps_wx,
+            tps_wy=tps_wy,
+        )
 
 
 def _load_fit(d: dict) -> "PolyFit | HomographyFit":
@@ -312,6 +345,48 @@ def auto_select_degree(n_points: int) -> int:
     return 2
 
 
+# ----- Thin-Plate Spline residual correction -----
+
+def _tps_kernel(r: np.ndarray) -> np.ndarray:
+    """TPS kernel r²·log r, with the convention 0·log 0 = 0."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(r < 1e-12, 0.0, r * r * np.log(r))
+
+
+def _fit_tps(src: np.ndarray, values: np.ndarray) -> np.ndarray:
+    """Fit a 2-D thin-plate spline.
+
+    src    : (N, 2) pixel coords of control points
+    values : (N,)  scalar residuals at each control point
+    Returns (N+3,) weights [w_0..w_{N-1}, a_const, a_u, a_v].
+    """
+    n = len(src)
+    diffs = src[:, None, :] - src[None, :, :]
+    r = np.sqrt((diffs ** 2).sum(axis=2))
+    K = _tps_kernel(r)
+    P = np.column_stack([np.ones(n, dtype=float), src])
+    A = np.zeros((n + 3, n + 3), dtype=float)
+    A[:n, :n] = K
+    A[:n, n:] = P
+    A[n:, :n] = P.T
+    rhs = np.zeros(n + 3, dtype=float)
+    rhs[:n] = values
+    weights, *_ = np.linalg.lstsq(A, rhs, rcond=None)
+    return weights
+
+
+def _eval_tps(src: np.ndarray, weights: np.ndarray, query: np.ndarray) -> np.ndarray:
+    """Evaluate a fitted TPS at (M, 2) query pixels. Returns (M,) values."""
+    n = len(src)
+    w_ctrl = weights[:n]
+    a = weights[n:]
+    diffs = query[:, None, :] - src[None, :, :]
+    r = np.sqrt((diffs ** 2).sum(axis=2))
+    K = _tps_kernel(r)
+    affine = a[0] + a[1] * query[:, 0] + a[2] * query[:, 1]
+    return K @ w_ctrl + affine
+
+
 # ----- homography fit (Direct Linear Transform) -----
 
 def _normalize_pts(pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -369,17 +444,15 @@ def _dlt_homography(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
     return H
 
 
-def fit_homography(points: Sequence[CalibrationPoint]) -> HomographyFit:
+def fit_homography(points: Sequence[CalibrationPoint], *, verbose: bool = False) -> HomographyFit:
     """Compute perspective homography H: pixel (u,v) → robot mm (X,Y).
 
-    Uses the Direct Linear Transform with Hartley normalization.
-    Requires ≥4 non-collinear calibration points.
-    For exactly 4 points the solution is exact (zero residual);
-    for N>4 it is the least-squares optimum over all N correspondences.
+    Uses the Direct Linear Transform with Hartley normalization, then layers
+    a thin-plate spline correction that drives the per-point residual to zero
+    and smoothly interpolates between calibration points.
 
-    This is the mathematically correct model for a camera looking at a flat
-    horizontal work surface — it handles oblique camera angles, perspective
-    foreshortening, and camera offsets exactly, unlike polynomial fits.
+    rms_residual_mm reflects the homography-only error (before TPS) so you
+    can see how well the global perspective model fits the data.
     """
     n = len(points)
     if n < 4:
@@ -390,15 +463,27 @@ def fit_homography(points: Sequence[CalibrationPoint]) -> HomographyFit:
     dst = np.array([[p.x_mm, p.y_mm] for p in points], dtype=float)
     H = _dlt_homography(src, dst)
 
-    # Vectorised RMS: apply H to all src points at once
-    src_h = np.column_stack([src, np.ones(n)])   # N×3
-    pred_h = (H @ src_h.T).T                      # N×3
-    w = pred_h[:, 2:3]
-    pred_xy = pred_h[:, :2] / w                   # N×2, perspective-divided
-    err_sq = ((pred_xy - dst) ** 2).sum(axis=1)
+    # Homography-only predictions and residuals
+    src_h = np.column_stack([src, np.ones(n)])
+    pred_h = (H @ src_h.T).T
+    w_col = pred_h[:, 2:3]
+    pred_xy = pred_h[:, :2] / w_col
+    residuals = dst - pred_xy                         # N×2: true − predicted
+    err_sq = (residuals ** 2).sum(axis=1)
     rms = float(math.sqrt(float(err_sq.mean())))
 
-    return HomographyFit(H=H, rms_residual_mm=rms)
+    if verbose:
+        print(f"  Homography RMS: {rms:.2f} mm  ({n} points)")
+        for i, (pt, res, esq) in enumerate(zip(points, residuals, err_sq)):
+            print(f"    pt{i+1:02d}  pixel({pt.u:.0f},{pt.v:.0f})"
+                  f"  robot({pt.x_mm:+.1f},{pt.y_mm:+.1f})"
+                  f"  Δ({res[0]:+.1f},{res[1]:+.1f})  |err|={math.sqrt(esq):.1f} mm")
+
+    # TPS residual correction: forces zero error at all calibration points
+    tps_wx = _fit_tps(src, residuals[:, 0])
+    tps_wy = _fit_tps(src, residuals[:, 1])
+
+    return HomographyFit(H=H, rms_residual_mm=rms, tps_src=src, tps_wx=tps_wx, tps_wy=tps_wy)
 
 
 # ----- work zone -----
