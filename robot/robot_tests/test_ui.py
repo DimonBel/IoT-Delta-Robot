@@ -18,12 +18,21 @@ rc: RobotController | None = None
 
 # --- Vision / detection streaming ---
 
+# Produce detections stick on the UI for 30 s after the last sighting (FruitTracker
+# keeps them alive across brief YOLO misses). Person detections are stripped from
+# /detections entirely and surfaced via /person-warning instead.
+STICKY_SECONDS = 30.0
+PERSON_HOLD_SECONDS = 4.0
+
 _vision = None
 _latest_detections: list = []
 _detection_lock = threading.Lock()
 
 _latest_frame_jpeg: bytes | None = None
 _frame_lock = threading.Lock()
+
+_person_warning = {"active": False, "last_seen_ts": 0.0, "count": 0}
+_person_lock = threading.Lock()
 
 try:
     import cv2 as _cv2
@@ -48,6 +57,15 @@ try:
 except Exception as _cal_err:
     print(f"Calibration not available: {_cal_err}")
 
+# Sticky produce tracker. max_age_frames=200 (~40 s at the 0.2 s loop period) is
+# safely larger than STICKY_SECONDS; the time filter below is the contract.
+try:
+    from vision.tracker import FruitTracker as _FruitTracker  # type: ignore
+    _tracker: "_FruitTracker | None" = _FruitTracker(max_age_frames=200)
+except Exception as _trk_err:
+    _tracker = None
+    print(f"Tracker not available: {_trk_err}")
+
 
 def _vision_loop() -> None:
     while True:
@@ -64,23 +82,62 @@ def _vision_loop() -> None:
                         rgb = frame.get("rgb")
                         _annotate_brd(dets, _calibrator, _calibrator.image_size, rgb_frame=rgb)
 
+                    # --- split by detection_type ---
+                    now = time.time()
+                    frame_index = int(payload.get("frame_index", 0) or 0)
+                    produce_dets = [d for d in dets if d.get("detection_type") == "produce"]
+                    person_dets = [d for d in dets if d.get("detection_type") == "human"]
+
+                    # Feed produce through the tracker so brief YOLO misses don't
+                    # make the icon flicker off the grid.
+                    if _tracker is not None:
+                        _tracker.update(produce_dets, frame_index, now)
+
                     # --- detections for the grid ---
-                    formatted = []
+                    formatted: list = []
+
+                    # Sticky produce: emit tracks last seen within STICKY_SECONDS.
+                    if _tracker is not None:
+                        for t in _tracker.tracks.values():
+                            if now - t.last_seen_ts > STICKY_SECONDS:
+                                continue
+                            formatted.append({
+                                "id": int(t.track_id),
+                                "label": t.label,
+                                "x_mm": round(float(t.x_mm), 1),
+                                "y_mm": round(float(t.y_mm), 1),
+                                "confidence": round(float(t.confidence), 1),
+                            })
+
+                    # Non-produce, non-human detections pass through fresh (no
+                    # stickiness): base_board, delta_robot, generic object.
                     for d in dets:
+                        dtype = d.get("detection_type")
+                        if dtype == "produce" or dtype == "human":
+                            continue
                         bxy = d.get("board_xy_mm") or {}
                         x = bxy.get("x")
                         y = bxy.get("y")
                         if x is None or y is None:
                             continue
                         formatted.append({
-                            "id": d.get("id", 0),
+                            "id": int(d.get("id", 0) or 0),
                             "label": d.get("label", "object"),
                             "x_mm": round(float(x), 1),
                             "y_mm": round(float(y), 1),
                             "confidence": round(float(d.get("confidence", 0)), 1),
                         })
+
                     with _detection_lock:
                         _latest_detections[:] = formatted
+
+                    # --- person warning state (refresh only on positive frames;
+                    # the endpoint applies the PERSON_HOLD_SECONDS time gate) ---
+                    if person_dets:
+                        with _person_lock:
+                            _person_warning["active"] = True
+                            _person_warning["last_seen_ts"] = now
+                            _person_warning["count"] = len(person_dets)
 
                     # --- camera snapshot (annotated frame with YOLO boxes) ---
                     if _cv2 is not None:
@@ -257,6 +314,21 @@ def get_detections():
     with _detection_lock:
         snapshot = list(_latest_detections)
     return jsonify(snapshot)
+
+
+@app.get("/person-warning")
+def person_warning():
+    with _person_lock:
+        state = dict(_person_warning)
+    now = time.time()
+    last_seen = float(state.get("last_seen_ts") or 0.0)
+    active = bool(state.get("active")) and last_seen > 0.0 and (now - last_seen) <= PERSON_HOLD_SECONDS
+    return jsonify({
+        "active": active,
+        "last_seen_ts": last_seen,
+        "seconds_since": round(now - last_seen, 1) if last_seen > 0.0 else None,
+        "count": int(state.get("count", 0)) if active else 0,
+    })
 
 
 def main() -> None:

@@ -40,6 +40,7 @@ class Track:
     last_frame: int
     last_seen_ts: float
     hits: int = 1
+    confidence: float = 0.0
 
     def to_dict(self, current_frame: Optional[int] = None) -> dict:
         out = {
@@ -47,6 +48,7 @@ class Track:
             "label": self.label,
             "board_xy_mm": {"x": self.x_mm, "y": self.y_mm},
             "quality_grade": self.quality_grade,
+            "confidence": self.confidence,
             "first_frame": self.first_frame,
             "last_frame": self.last_frame,
             "last_seen_ts": self.last_seen_ts,
@@ -138,6 +140,12 @@ class FruitTracker:
             t.last_seen_ts = now_ts
             t.hits += 1
             t.quality_grade = (d.get("quality") or {}).get("grade") or t.quality_grade
+            conf = d.get("confidence")
+            if conf is not None:
+                try:
+                    t.confidence = float(conf)
+                except (TypeError, ValueError):
+                    pass
             d["track_id"] = tid
 
         # New tracks for unmatched detections.
@@ -147,6 +155,10 @@ class FruitTracker:
             tid = self._next_id
             self._next_id += 1
             quality_grade = (d.get("quality") or {}).get("grade")
+            try:
+                conf = float(d.get("confidence") or 0.0)
+            except (TypeError, ValueError):
+                conf = 0.0
             t = Track(
                 track_id=tid,
                 label=label,
@@ -157,6 +169,7 @@ class FruitTracker:
                 last_frame=frame_index,
                 last_seen_ts=now_ts,
                 hits=1,
+                confidence=conf,
             )
             self._tracks[tid] = t
             d["track_id"] = tid

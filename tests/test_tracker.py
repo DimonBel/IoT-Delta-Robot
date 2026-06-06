@@ -16,7 +16,7 @@ import unittest
 from vision.tracker import FruitTracker
 
 
-def _det(label, x, y, *, dt="produce", track_id=None, quality=None):
+def _det(label, x, y, *, dt="produce", track_id=None, quality=None, confidence=None):
     d = {
         "label": label,
         "detection_type": dt,
@@ -25,6 +25,8 @@ def _det(label, x, y, *, dt="produce", track_id=None, quality=None):
     }
     if quality is not None:
         d["quality"] = {"grade": quality}
+    if confidence is not None:
+        d["confidence"] = confidence
     return d
 
 
@@ -143,6 +145,27 @@ class FruitTrackerTests(unittest.TestCase):
         self.assertEqual(a2["track_id"], a["track_id"])
         self.assertEqual(b2["track_id"], b["track_id"])
         self.assertEqual(len(tr.tracks), 2)
+
+
+    def test_confidence_recorded_and_preserved(self):
+        tr = FruitTracker(match_radius_mm=40.0)
+        d1 = _det("orange", 0.0, 0.0, confidence=82.0)
+        tr.update([d1], frame_index=0, now_ts=0.0)
+        tid = d1["track_id"]
+        self.assertAlmostEqual(tr.tracks[tid].confidence, 82.0)
+
+        # Matched detection without a confidence field preserves last-known value.
+        d2 = _det("orange", 5.0, 0.0)
+        tr.update([d2], frame_index=1, now_ts=0.1)
+        self.assertAlmostEqual(tr.tracks[tid].confidence, 82.0)
+
+        # New confidence on the next match updates it.
+        d3 = _det("orange", 5.0, 0.0, confidence=64.5)
+        tr.update([d3], frame_index=2, now_ts=0.2)
+        self.assertAlmostEqual(tr.tracks[tid].confidence, 64.5)
+
+        # to_dict exposes the field.
+        self.assertAlmostEqual(tr.tracks[tid].to_dict()["confidence"], 64.5)
 
 
 if __name__ == "__main__":
