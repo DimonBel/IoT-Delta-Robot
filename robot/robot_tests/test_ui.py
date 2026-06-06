@@ -99,8 +99,14 @@ def _vision_loop() -> None:
 
 threading.Thread(target=_vision_loop, daemon=True).start()
 
-PORT = "COM11" # windows
+# PORT = "COM11" # windows, Alexandra
+# PORT = "COM6" # windows, Ivan
 # PORT = "/dev/cu.usbmodem153408901" # macos
+
+PORT = "COM8" # windows, Arduino test dummy
+
+X_OFFSET = 40
+Y_OFFSET = 10
 
 @app.get("/")
 def index():
@@ -118,6 +124,8 @@ def move():
     axes = ["X", "Y", "Z", "U", "V", "W"]
     raw_values = {axis: float(payload.get(axis, 0)) for axis in axes}
     values = {axis: int(round(raw_values[axis])) for axis in axes}
+    values["X"] += X_OFFSET
+    values["Y"] += Y_OFFSET
     move_args = ", ".join(f"{axis}={values[axis]:.0f}" for axis in axes)
     if rc is None:
         return jsonify({"status": "error", "error": "robot not ready"}), 503

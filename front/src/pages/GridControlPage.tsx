@@ -14,15 +14,6 @@ type CameraDetection = { id: number; label: string; x_mm: number; y_mm: number; 
 
 const DETECTION_COLOR = '#e24a4a';
 
-function detectionEmoji(label: string): string {
-  const l = label.toLowerCase();
-  if (l === 'apple') return '🍎';
-  if (l === 'orange') return '🍊';
-  if (l === 'banana') return '🍌';
-  if (l === 'tomato') return '🍅';
-  if (l === 'lemon') return '🍋';
-  return '🔴';
-}
 
 function createInitialState(): AxisState {
   return { X: 0, Y: 0, Z: 0, U: 0, V: 0, W: 0 };
@@ -465,42 +456,26 @@ export default function GridControlPage() {
           {detections
             .filter(d => Math.abs(d.x_mm) <= HALF && Math.abs(d.y_mm) <= HALF)
             .map(d => {
-              const pixelX = (-d.x_mm + HALF) / WORKSPACE * px;
-              const pixelY = (d.y_mm + HALF) / WORKSPACE * px;
               const col = getCellFromPos(d.x_mm, true);
               const row = getCellFromPos(d.y_mm, false);
+              const startCol = Math.min(Math.max(col - 1, 0), CELLS - 3);
+              const startRow = Math.min(Math.max(row - 1, 0), CELLS - 3);
               return (
                 <Box
                   key={`det-${d.id}`}
-                  onClick={() => handleCellClick(row, col)}
-                  title={`${d.label}  ${d.confidence}%\nX=${d.x_mm}mm  Y=${d.y_mm}mm\nClick to target`}
                   sx={{
                     position: 'absolute',
-                    left: pixelX,
-                    top: pixelY,
-                    transform: 'translate(-50%, -50%)',
+                    left: startCol * cellPx,
+                    top: startRow * cellPx,
                     width: cellPx * 3,
                     height: cellPx * 3,
-                    borderRadius: '50%',
-                    background: 'rgba(226,74,74,.18)',
-                    border: `1.5px solid ${DETECTION_COLOR}`,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    fontSize: cellPx * 1.8,
-                    lineHeight: 1,
-                    cursor: 'pointer',
+                    background: 'rgba(226,74,74,.24)',
+                    border: `1px solid ${DETECTION_COLOR}`,
+                    borderRadius: '2px',
                     zIndex: 10,
-                    animation: 'detPulse 2.4s ease infinite',
-                    transition: 'background .1s, transform .1s',
-                    '&:hover': {
-                      background: 'rgba(226,74,74,.38)',
-                      transform: 'translate(-50%,-50%) scale(1.1)',
-                    },
+                    pointerEvents: 'none',
                   }}
-                >
-                  {detectionEmoji(d.label)}
-                </Box>
+                />
               );
             })
           }
