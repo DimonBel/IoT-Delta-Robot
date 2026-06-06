@@ -1,8 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { Box, Typography, Button, Slider } from '@mui/material';
 import { palette } from '../theme';
-import { CAMERA_EXTERNAL_URL } from '../constants';
-import { useMjpegStream } from '../hooks/useMjpegStream';
 
 const WORKSPACE = 400;
 const HALF = WORKSPACE / 2;
@@ -11,6 +9,20 @@ const CELL_UNITS = WORKSPACE / CELLS;
 
 type AxisState = { X: number; Y: number; Z: number; U: number; V: number; W: number };
 const AXES: (keyof AxisState)[] = ['X', 'Y', 'Z', 'U', 'V', 'W'];
+
+type CameraDetection = { id: number; label: string; x_mm: number; y_mm: number; confidence: number };
+
+const DETECTION_COLOR = '#e24a4a';
+
+function detectionEmoji(label: string): string {
+  const l = label.toLowerCase();
+  if (l === 'apple') return '🍎';
+  if (l === 'orange') return '🍊';
+  if (l === 'banana') return '🍌';
+  if (l === 'tomato') return '🍅';
+  if (l === 'lemon') return '🍋';
+  return '🔴';
+}
 
 function createInitialState(): AxisState {
   return { X: 0, Y: 0, Z: 0, U: 0, V: 0, W: 0 };
@@ -45,7 +57,36 @@ function useGridSize(): { ref: React.RefObject<HTMLDivElement | null>; px: numbe
 }
 
 function CameraStreamCard({ height }: { height: number }) {
-  const { frameUrl, live, error } = useMjpegStream(CAMERA_EXTERNAL_URL, true);
+  const [frameUrl, setFrameUrl] = useState<string | null>(null);
+  const [live, setLive] = useState(false);
+  const prevUrlRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      try {
+        const r = await fetch('/snapshot');
+        if (r.ok && alive) {
+          const blob = await r.blob();
+          const url = URL.createObjectURL(blob);
+          if (prevUrlRef.current) URL.revokeObjectURL(prevUrlRef.current);
+          prevUrlRef.current = url;
+          setFrameUrl(url);
+          setLive(true);
+        } else if (alive) {
+          setLive(false);
+        }
+      } catch {
+        if (alive) setLive(false);
+      }
+      if (alive) setTimeout(poll, 500);
+    };
+    poll();
+    return () => {
+      alive = false;
+      if (prevUrlRef.current) URL.revokeObjectURL(prevUrlRef.current);
+    };
+  }, []);
 
   return (
     <Box sx={{ background: palette.surface, border: `1px solid ${palette.surfaceBorder}`, borderRadius: 1, p: '10px 12px', display: 'flex', flexDirection: 'column', height }}>
@@ -71,13 +112,12 @@ function CameraStreamCard({ height }: { height: number }) {
           overflow: 'hidden',
         }}
       >
-        {frameUrl && (
+        {frameUrl ? (
           <img src={frameUrl} alt="Camera" style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }} />
-        )}
-        {!live && !frameUrl && (
+        ) : (
           <Box sx={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <Typography sx={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: error ? palette.error : palette.textMuted }}>
-              {error ? 'STREAM ERROR' : 'CONNECTING...'}
+            <Typography sx={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: palette.textMuted }}>
+              CONNECTING...
             </Typography>
           </Box>
         )}
@@ -93,8 +133,22 @@ export default function GridControlPage() {
   const [speed, setSpeed] = useState(50);
   const [acceleration, setAcceleration] = useState(500);
   const [selectedCell, setSelectedCell] = useState<{ row: number; col: number } | null>(null);
+  const [detections, setDetections] = useState<CameraDetection[]>([]);
   const { ref: gridContainerRef, px } = useGridSize();
   const cellPx = px / CELLS;
+
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      try {
+        const r = await fetch('/detections');
+        if (r.ok && alive) setDetections(await r.json());
+      } catch { /* server not ready yet */ }
+      if (alive) setTimeout(poll, 300);
+    };
+    poll();
+    return () => { alive = false; };
+  }, []);
 
   const handleCellClick = useCallback((row: number, col: number) => {
     const { x, y } = cellCenter(row, col);
@@ -244,6 +298,10 @@ export default function GridControlPage() {
               <Box sx={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                 <Box sx={{ width: 8, height: 8, borderRadius: '50%', background: palette.success }} />
                 <Typography sx={{ fontSize: 11, color: palette.textMuted }}>Current</Typography>
+              </Box>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <Box sx={{ width: 8, height: 8, borderRadius: '50%', background: DETECTION_COLOR }} />
+                <Typography sx={{ fontSize: 11, color: palette.textMuted }}>Detected</Typography>
               </Box>
             </Box>
           </Box>
@@ -402,6 +460,50 @@ export default function GridControlPage() {
               }}
             />
           )}
+
+          <style>{'@keyframes detPulse{0%,100%{box-shadow:0 0 0 0 rgba(226,74,74,.55)}60%{box-shadow:0 0 0 7px rgba(226,74,74,0)}}'}</style>
+          {detections
+            .filter(d => Math.abs(d.x_mm) <= HALF && Math.abs(d.y_mm) <= HALF)
+            .map(d => {
+              const pixelX = (-d.x_mm + HALF) / WORKSPACE * px;
+              const pixelY = (d.y_mm + HALF) / WORKSPACE * px;
+              const col = getCellFromPos(d.x_mm, true);
+              const row = getCellFromPos(d.y_mm, false);
+              return (
+                <Box
+                  key={`det-${d.id}`}
+                  onClick={() => handleCellClick(row, col)}
+                  title={`${d.label}  ${d.confidence}%\nX=${d.x_mm}mm  Y=${d.y_mm}mm\nClick to target`}
+                  sx={{
+                    position: 'absolute',
+                    left: pixelX,
+                    top: pixelY,
+                    transform: 'translate(-50%, -50%)',
+                    width: cellPx * 3,
+                    height: cellPx * 3,
+                    borderRadius: '50%',
+                    background: 'rgba(226,74,74,.18)',
+                    border: `1.5px solid ${DETECTION_COLOR}`,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: cellPx * 1.8,
+                    lineHeight: 1,
+                    cursor: 'pointer',
+                    zIndex: 10,
+                    animation: 'detPulse 2.4s ease infinite',
+                    transition: 'background .1s, transform .1s',
+                    '&:hover': {
+                      background: 'rgba(226,74,74,.38)',
+                      transform: 'translate(-50%,-50%) scale(1.1)',
+                    },
+                  }}
+                >
+                  {detectionEmoji(d.label)}
+                </Box>
+              );
+            })
+          }
         </Box>
 
         <CameraStreamCard height={px + 24} />

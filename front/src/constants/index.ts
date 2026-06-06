@@ -97,7 +97,7 @@ export const UPTIME_TYPE_META: Record<UptimeSegment['type'], UptimeTypeMeta> = {
   idle: { icon: '\u25CB', label: 'Idle' },
 };
 
-export const CAMERA_EXTERNAL_URL = 'https://freely-mandolin-ladder.ngrok-free.dev/video';
+export const CAMERA_EXTERNAL_URL = '/snapshot';
 export const CAMERA_ZED_URL = '';
 
 export const TELEMETRY_MESSAGES: [string, 'info' | 'ok'][] = [
